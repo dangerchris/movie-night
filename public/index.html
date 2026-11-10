@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Movie Night</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='3' y='7' width='26' height='18' rx='3' fill='%23f2b544'/%3E%3Ccircle cx='10' cy='16' r='3' fill='%23161218'/%3E%3Ccircle cx='22' cy='16' r='3' fill='%23161218'/%3E%3C/svg%3E">
+</head>
+<body>
+  <header class="topbar">
+    <h1 id="title">Movie Night</h1>
+    <div class="topbar-right" id="userbar"></div>
+  </header>
+
+  <main id="main"><p class="muted center">Loading…</p></main>
+
+  <footer class="attribution">
+    Movie data and posters from <a href="https://www.themoviedb.org/" target="_blank" rel="noopener">TMDB</a>.
+    This product uses the TMDB API but is not endorsed or certified by TMDB.
+  </footer>
+
+  <div id="movie-pop" class="movie-pop" role="tooltip" hidden></div>
+
+  <dialog id="propose-dialog" class="dialog wide">
+    <form method="dialog" class="dialog-body" id="propose-form">
+      <header class="dialog-head">
+        <h2>Propose movies <span class="muted" id="propose-date"></span></h2>
+        <button class="icon-btn" value="cancel" aria-label="Close">&times;</button>
+      </header>
+      <div class="draft-slots" id="draft-slots"></div>
+      <input type="search" id="search-input" class="search" placeholder="Search movies (add a year to narrow: alien 1979)" autocomplete="off">
+      <div class="search-results" id="search-results"></div>
+      <footer class="dialog-foot">
+        <span class="muted" id="propose-hint"></span>
+        <button type="button" class="btn primary" id="propose-save" disabled>Save choices</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="roles-dialog" class="dialog">
+    <form method="dialog" class="dialog-body" id="roles-form">
+      <header class="dialog-head">
+        <h2>Roles <span class="muted" id="roles-date"></span></h2>
+        <button class="icon-btn" value="cancel" aria-label="Close">&times;</button>
+      </header>
+      <label class="field">Proposer <select name="proposer"></select></label>
+      <label class="field">Chooser <select name="chooser"></select></label>
+      <p class="muted small">"Follow rotation" clears the override for this night.</p>
+      <footer class="dialog-foot"><button type="button" class="btn primary" id="roles-save">Save</button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="settings-dialog" class="dialog wide">
+    <div class="dialog-body">
+      <header class="dialog-head">
+        <h2>Settings</h2>
+        <form method="dialog"><button class="icon-btn" aria-label="Close">&times;</button></form>
+      </header>
+      <form id="settings-form" class="settings-grid">
+        <label class="field">Name <input name="title" maxlength="60" required></label>
+        <label class="field">Night
+          <select name="nightWeekday">
+            <option value="0">Sunday</option><option value="1">Monday</option><option value="2">Tuesday</option>
+            <option value="3">Wednesday</option><option value="4">Thursday</option><option value="5">Friday</option>
+            <option value="6">Saturday</option>
+          </select>
+        </label>
+        <label class="field">Start time <input name="nightTime" type="time" required></label>
+        <label class="field">Timezone <input name="timezone" list="tz-list" required></label>
+        <label class="field">Rating region <input name="region" maxlength="2" pattern="[A-Za-z]{2}" title="Two-letter country code, e.g. CA or US"></label>
+        <div class="field"><button class="btn primary" type="submit">Save settings</button></div>
+      </form>
+      <datalist id="tz-list"></datalist>
+
+      <h3>Participants <span class="muted small">rotation order: everyone proposes once per round; the chooser shifts each round so pairings vary</span></h3>
+      <ol id="participant-list" class="participant-list"></ol>
+      <form id="add-participant" class="add-participant">
+        <input name="name" placeholder="Name">
+        <input name="email" type="email" placeholder="Google account email" required>
+        <button class="btn" type="submit">Add</button>
+      </form>
+    </div>
+  </dialog>
+
+  <div id="toast" class="toast" hidden></div>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

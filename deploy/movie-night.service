@@ -1,0 +1,14 @@
+[Unit]
+Description=Movie Night
+After=network-online.target
+
+[Service]
+User=movienight
+WorkingDirectory=/home/movienight/movie-night
+ExecStart=/home/movienight/.bun/bin/bun src/server.ts
+Restart=on-failure
+MemoryMax=256M
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target
