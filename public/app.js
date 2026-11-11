@@ -62,9 +62,8 @@ const isMe = (p) => p && state?.me && p.email === state.me.email;
 const personHtml = (p) => p ? `<span class="${isMe(p) ? "you" : ""}">${esc(p.name)}${isMe(p) ? " (you)" : ""}</span>` : `<span class="muted">nobody</span>`;
 
 function posterHtml(m, { size = "w342", cls = "", ribbon = "" } = {}) {
-  const img = m.posterPath
-    ? `<img src="${IMG}${size}${esc(m.posterPath)}" alt="${esc(m.title)} poster" loading="lazy">`
-    : `<span class="no-img">${esc(m.title)}</span>`;
+  const src = m.posterPath ? `${IMG}${size}${esc(m.posterPath)}` : m.jellyfinId ? `/api/library/poster/${esc(m.jellyfinId)}` : null;
+  const img = src ? `<img src="${src}" alt="${esc(m.title)} poster" loading="lazy">` : `<span class="no-img">${esc(m.title)}</span>`;
   return `<button type="button" class="poster ${cls}" data-movie="${m.id}" aria-label="${esc(m.title)}">${img}${ribbon ? `<span class="ribbon">${esc(ribbon)}</span>` : ""}</button>`;
 }
 
@@ -386,16 +385,26 @@ function openPropose(date) {
   $("#propose-date").textContent = fmtDate(n.on, { weekday: "short", month: "short", day: "numeric" });
   $("#search-input").value = "";
   pastProposals = null;
-  showHistory();
+  libraryMovies = null;
+  showSuggestions();
   renderDraft();
   proposeDlg.showModal();
   $("#search-input").focus();
   api("GET", `/api/proposal-history?exclude=${date}`).then(({ movies }) => {
     pastProposals = movies;
     for (const m of movies) movieCache.set(m.id, m);
-    if ($("#search-input").value.trim().length < 2) showHistory();
-  }).catch(() => { pastProposals = []; showHistory(); });
+    if ($("#search-input").value.trim().length < 2) showSuggestions();
+  }).catch(() => { pastProposals = []; showSuggestions(); });
+  api("GET", "/api/library").then((lib) => {
+    libraryMovies = lib.movies;
+    libraryUsers = lib.matchedUsers;
+    for (const m of lib.movies) if ("streaming" in m) movieCache.set(m.id, m);
+    if ($("#search-input").value.trim().length < 2) showSuggestions();
+  }).catch(() => { libraryMovies = []; showSuggestions(); });
 }
+
+let libraryMovies = null; // Jellyfin movies nobody has seen (null while loading)
+let libraryUsers = [];
 
 let pastProposals = null; // previously proposed, never-picked movies (null while loading)
 const known = new Map(); // id -> movie for anything shown in the results area
@@ -408,15 +417,29 @@ function resultHtml(m, caption) {
   </button>`;
 }
 
-function showHistory() {
+function showSuggestions() {
   searchSeq++; // drop any in-flight search
   const box = $("#search-results");
-  if (pastProposals === null) { box.innerHTML = `<p class="muted small">Loading previously proposed movies…</p>`; return; }
-  if (!pastProposals.length) { box.innerHTML = `<p class="muted small">Search for a movie, then click it to add it to a slot.</p>`; return; }
-  for (const m of pastProposals) known.set(m.id, m);
+  if (pastProposals === null && libraryMovies === null) { box.innerHTML = `<p class="muted small">Loading suggestions…</p>`; return; }
+  const past = pastProposals ?? [];
+  const pastIds = new Set(past.map((m) => m.id));
+  const lib = (libraryMovies ?? []).filter((m) => !pastIds.has(m.id));
+  for (const m of [...past, ...lib]) known.set(m.id, m);
   const when = (m) => fmtDate(m.lastProposed, { month: "short", day: "numeric" });
-  box.innerHTML = `<p class="results-heading">Proposed before, never picked<span class="muted small"> · or search for anything</span></p>`
-    + pastProposals.map((m) => resultHtml(m, `${esc(when(m))}${m.proposedBy ? ` · ${esc(m.proposedBy)}` : ""}${m.times > 1 ? ` · ${m.times}×` : ""}`)).join("");
+  let html = "";
+  if (past.length)
+    html += `<p class="results-heading">Proposed before, never picked</p>`
+      + past.map((m) => resultHtml(m, `${esc(when(m))}${m.proposedBy ? ` · ${esc(m.proposedBy)}` : ""}${m.times > 1 ? ` · ${m.times}×` : ""}`)).join("");
+  if (libraryMovies === null)
+    html += `<p class="results-heading muted">Loading the Jellyfin library…</p>`;
+  else if (lib.length) {
+    const who = libraryUsers.length ? `nobody (${libraryUsers.join(", ")}) has watched` : "unwatched";
+    html += `<p class="results-heading">In the library, ${esc(who)}<span class="muted small"> · ${lib.length}, newest first</span></p>`
+      + lib.map((m) => resultHtml(m, "")).join("");
+  }
+  box.innerHTML = html
+    ? `<p class="results-hint muted small">Pick from these, or search for any movie above.</p>` + html
+    : `<p class="muted small">Search for a movie, then click it to add it to a slot.</p>`;
   renderDraft();
 }
 
@@ -424,7 +447,8 @@ function renderDraft() {
   $("#draft-slots").innerHTML = [0, 1, 2].map((i) => {
     const m = draft[i];
     if (!m) return `<div class="draft-slot empty">Choice ${i + 1}</div>`;
-    const img = m.posterPath ? `<img src="${IMG}w92${esc(m.posterPath)}" alt="">` : `<span class="thumb"></span>`;
+    const src = m.posterPath ? `${IMG}w92${esc(m.posterPath)}` : m.jellyfinId ? `/api/library/poster/${esc(m.jellyfinId)}` : null;
+    const img = src ? `<img src="${src}" alt="">` : `<span class="thumb"></span>`;
     return `<div class="draft-slot">${img}<div class="info"><b>${esc(m.title)}</b><span class="muted">${esc(m.year ?? "")}</span></div>
       <button type="button" class="icon-btn" data-action="draft-remove" data-index="${i}" aria-label="Remove">&times;</button></div>`;
   }).join("");
@@ -437,7 +461,7 @@ function renderDraft() {
 async function runSearch() {
   const qv = $("#search-input").value.trim();
   const box = $("#search-results");
-  if (qv.length < 2) return showHistory();
+  if (qv.length < 2) return showSuggestions();
   const seq = ++searchSeq;
   box.innerHTML = `<p class="muted small">Searching…</p>`;
   try {
@@ -445,7 +469,11 @@ async function runSearch() {
     if (seq !== searchSeq) return;
     for (const m of results) known.set(m.id, m);
     box.innerHTML = results.length
-      ? results.map((m) => resultHtml(m, m.watched ? `<span class="badge picked">Watched ${esc(fmtDate(m.watched, { month: "short", day: "numeric" }))}</span>` : "")).join("")
+      ? results.map((m) => resultHtml(m, [
+          m.watched ? `<span class="badge picked">Watched ${esc(fmtDate(m.watched, { month: "short", day: "numeric" }))}</span>` : "",
+          m.inLibrary ? `<span class="badge lib">In library</span>` : "",
+          m.seenBy?.length ? `Seen by ${esc(m.seenBy.join(", "))}` : "",
+        ].filter(Boolean).join(" "))).join("")
       : `<p class="muted small">No matches.</p>`;
     renderDraft();
   } catch (e) {

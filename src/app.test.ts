@@ -17,8 +17,9 @@ const fakeMovies: MovieSource = {
 };
 
 // Tuesday 2026-11-10, noon UTC. Next Saturday is 2026-11-14.
-function setup() {
+function setup(library: any = null) {
   const app = createApp({
+    library,
     db: openDb(":memory:"), movies: fakeMovies, adminEmails: [],
     auth: { accessTeamDomain: "", accessAud: "", picker: "localhost", publicUrl: "https://movies.example" },
     now: () => new Date("2026-11-10T17:00:00Z"),
@@ -221,6 +222,42 @@ describe("api", () => {
     expect(r.json.movies.map((m: any) => m.id)).toEqual([1, 3]);
     r = await call("a@x.com", "GET", "/api/search?q=thing");
     expect(r.json.results.map((m: any) => m.watched)).toEqual([null, "2026-11-14"]);
+  });
+
+  test("library lists movies no participant has seen; search marks library and seen-by", async () => {
+    let askedFor: string[] = [];
+    const lib = {
+      async movies(names: string[]) {
+        askedFor = names;
+        return {
+          matchedUsers: ["A", "B"],
+          movies: [
+            { tmdbId: 1, jellyfinId: "j1", title: "One", year: 2001, added: "2026-11-01", seenBy: [] },
+            { tmdbId: 2, jellyfinId: "j2", title: "Two", year: 2002, added: "2026-10-01", seenBy: ["B"] },
+            { tmdbId: 7, jellyfinId: "j7", title: "Seven", year: 2007, added: "2026-09-01", seenBy: [] },
+          ],
+        };
+      },
+      async poster() { return new Response("img"); },
+    };
+    const { call } = setup(lib);
+    await call(null, "POST", "/api/setup", { email: "a@x.com", name: "A" });
+    await call("a@x.com", "POST", "/api/participants", { email: "b@x.com", name: "B" });
+    await call("a@x.com", "PUT", "/api/nights/2026-11-14/proposals", { tmdbIds: [7, 8, 9] });
+    await call("a@x.com", "PUT", "/api/nights/2026-11-14/selection", { tmdbId: 7 }); // picked = watched
+    let r = await call("a@x.com", "GET", "/api/library");
+    expect(askedFor.sort()).toEqual(["A", "B"]);
+    expect(r.json.movies.map((m: any) => m.id)).toEqual([1]);
+    expect(r.json.movies[0]).toMatchObject({ inLibrary: true, jellyfinId: "j1" });
+    r = await call("a@x.com", "GET", "/api/search?q=xy");
+    expect(r.json.results.map((m: any) => [m.id, m.inLibrary, m.seenBy])).toEqual([[1, true, []], [2, true, ["B"]]]);
+    expect((await call("a@x.com", "GET", "/api/library/poster/not-an-id")).status).toBe(404);
+  });
+
+  test("library endpoint is harmless when Jellyfin isn't configured", async () => {
+    const { call } = setup();
+    await call(null, "POST", "/api/setup", { email: "a@x.com", name: "A" });
+    expect((await call("a@x.com", "GET", "/api/library")).json).toEqual({ enabled: false, movies: [], matchedUsers: [] });
   });
 
   test("non-admins can rename only themselves", async () => {

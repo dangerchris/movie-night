@@ -3,12 +3,14 @@ import { createApp } from "./app.ts";
 import { parsePickerMode } from "./auth.ts";
 import { openDb } from "./db.ts";
 import { tmdbSource } from "./tmdb.ts";
+import { jellyfinLibrary } from "./jellyfin.ts";
 
 const env = process.env;
 const app = createApp({
   db: openDb(env.DB_PATH ?? "./data/movie-night.sqlite"),
   movies: tmdbSource(env.TMDB_TOKEN ?? ""),
   adminEmails: (env.ADMIN_EMAILS ?? "").split(","),
+  library: jellyfinLibrary(env.JELLYFIN_URL ?? "", env.JELLYFIN_API_KEY ?? ""),
   auth: {
     accessTeamDomain: env.ACCESS_TEAM_DOMAIN ?? "",
     accessAud: env.ACCESS_AUD ?? "",

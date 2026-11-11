@@ -6,6 +6,7 @@ import {
   isIsoDate, isValidTimezone, nextWeekday, rotationRoles, todayInTz, upcomingNightDates, weekdayOf,
 } from "./schedule.ts";
 import { TmdbError, type MovieDetails, type MovieSource } from "./tmdb.ts";
+import type { Library } from "./jellyfin.ts";
 
 export const PROPOSAL_COUNT = 3;
 const MOVIE_CACHE_MS = 7 * 86_400_000;
@@ -17,6 +18,7 @@ export interface AppDeps {
   auth: AuthConfig;
   movies: MovieSource;
   adminEmails: string[];
+  library?: Library | null;
   now?: () => Date;
 }
 
@@ -72,7 +74,7 @@ export function tidyProviders(names: string[]): string[] {
   return [...set].filter((n) => !(n.endsWith(" (via Prime)") && set.has(n.slice(0, -" (via Prime)".length))));
 }
 
-export function createApp({ db, auth, movies, adminEmails, now = () => new Date() }: AppDeps) {
+export function createApp({ db, auth, movies, adminEmails, library = null, now = () => new Date() }: AppDeps) {
   const admins = new Set(adminEmails.map((e) => e.trim().toLowerCase()).filter(Boolean));
 
   // ---------- data access ----------
@@ -335,13 +337,73 @@ export function createApp({ db, auth, movies, adminEmails, now = () => new Date(
 
   const watchedMap = () => new Map(q.picked.all().map((r) => [r.id, r.on_date]));
 
+  const participantNames = () => q.participants.all().filter((p) => p.active).map((p) => p.name);
+
+  /** Library contents keyed by TMDB id, or null if Jellyfin isn't configured or is unreachable. */
+  async function libraryIndex() {
+    if (!library) return null;
+    try {
+      const { movies: list, matchedUsers } = await library.movies(participantNames());
+      return { byTmdb: new Map(list.map((m) => [m.tmdbId, m])), list, matchedUsers };
+    } catch (e) {
+      console.error(e);
+      return null;
+    }
+  }
+
+  // Fetch TMDB details for library movies in the background so posters and hover cards are ready.
+  let warming = false;
+  async function warmMovieCache(ids: number[]) {
+    if (warming) return;
+    warming = true;
+    try {
+      const todo = ids.filter((id) => !q.cachedMovie.get(id));
+      for (let i = 0; i < todo.length; i += 4)
+        await Promise.allSettled(todo.slice(i, i + 4).map((id) => getMovie(id)));
+    } finally {
+      warming = false;
+    }
+  }
+
   app.get("/api/search", async (c) => {
     requireMe(c);
     const query = (c.req.query("q") ?? "").trim();
     if (query.length < 2) return c.json({ results: [] });
     const watched = watchedMap();
-    const results = await movies.search(query);
-    return c.json({ results: results.map((r) => ({ ...r, watched: watched.get(r.id) ?? null })) });
+    const [results, lib] = await Promise.all([movies.search(query), libraryIndex()]);
+    return c.json({
+      results: results.map((r) => {
+        const inLib = lib?.byTmdb.get(r.id);
+        return { ...r, watched: watched.get(r.id) ?? null, inLibrary: !!inLib, seenBy: inLib?.seenBy ?? [] };
+      }),
+    });
+  });
+
+  // Library movies none of the participants have played (and that movie night hasn't picked).
+  app.get("/api/library", async (c) => {
+    requireMe(c);
+    const lib = await libraryIndex();
+    if (!lib) return c.json({ enabled: !!library, movies: [], matchedUsers: [] });
+    const s = getSettings();
+    const watched = watchedMap();
+    const unseen = lib.list.filter((m) => m.seenBy.length === 0 && !watched.has(m.tmdbId));
+    void warmMovieCache(unseen.map((m) => m.tmdbId));
+    return c.json({
+      enabled: true,
+      matchedUsers: lib.matchedUsers,
+      movies: unseen.map((m) => {
+        const cached = q.cachedMovie.get(m.tmdbId);
+        const base = cached ? movieView(JSON.parse(cached.data), s.region) : { id: m.tmdbId, title: m.title, year: m.year ? String(m.year) : null, posterPath: null };
+        return { ...base, inLibrary: true, jellyfinId: m.jellyfinId, added: m.added };
+      }),
+    });
+  });
+
+  app.get("/api/library/poster/:id", async (c) => {
+    requireMe(c);
+    const id = c.req.param("id");
+    if (!library || !/^[0-9a-f]{32}$/i.test(id)) throw new HttpError(404, "not_found");
+    return library.poster(id);
   });
 
   // Movies proposed before (on other nights) and never picked: ready-made options for the proposer.
