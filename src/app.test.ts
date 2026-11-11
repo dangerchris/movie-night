@@ -18,11 +18,12 @@ const fakeMovies: MovieSource = {
 
 // Tuesday 2026-11-10, noon UTC. Next Saturday is 2026-11-14.
 function setup(library: any = null) {
+  const clock = { now: new Date("2026-11-10T17:00:00Z") };
   const app = createApp({
     library,
     db: openDb(":memory:"), movies: fakeMovies, adminEmails: [],
     auth: { accessTeamDomain: "", accessAud: "", picker: "localhost", publicUrl: "https://movies.example" },
-    now: () => new Date("2026-11-10T17:00:00Z"),
+    now: () => clock.now,
   });
   const peer = (address: string) => ({ requestIP: () => ({ address }) });
   const call = async (as: string | null, method: string, path: string, body?: unknown, from = "127.0.0.1") => {
@@ -31,7 +32,8 @@ function setup(library: any = null) {
     const res = await app.request(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) }, peer(from));
     return { status: res.status, json: (await res.json()) as any };
   };
-  return { app, call, peer };
+  const setDay = (iso: string) => { clock.now = new Date(iso + "T17:00:00Z"); };
+  return { app, call, peer, setDay };
 }
 
 describe("schedule", () => {
@@ -171,27 +173,116 @@ describe("api", () => {
     expect(r.json.upcoming[0].time).toBe("18:00");
   });
 
-  test("locked nights can move dates, keeping roles and choices; a plain move isn't adopted later", async () => {
-    const { call } = setup();
+  const three = async (call: any) => {
     await call(null, "POST", "/api/setup", { email: "a@x.com", name: "A" });
     await call("a@x.com", "POST", "/api/participants", { email: "b@x.com", name: "B" });
-    await call("a@x.com", "PUT", "/api/settings", { schedule: [{ weekday: 1, time: "19:30" }, { weekday: 6, time: "19:30" }] });
-    await call("a@x.com", "PUT", "/api/nights/2026-11-21/proposals", { tmdbIds: [1, 2, 3] });
+    await call("a@x.com", "POST", "/api/participants", { email: "c@x.com", name: "C" });
+  };
+  const MON_SAT = { schedule: [{ weekday: 1, time: "20:00" }, { weekday: 6, time: "19:30" }] };
+  const brief = (st: any) => st.upcoming.map((n: any) => `${n.date} ${n.proposer.name}>${n.chooser.name}${n.inLineup ? "*" : ""}`);
+
+  test("the lineup fills the schedule in order with no gaps when nights are added", async () => {
+    const { call } = setup();
+    await three(call);
+    await call("a@x.com", "PUT", "/api/nights/2026-11-14/proposals", { tmdbIds: [1, 2, 3] });
+    await call("a@x.com", "PUT", "/api/nights/2026-11-21/proposals", { tmdbIds: [4, 5, 6] });
+    await call("a@x.com", "PUT", "/api/nights/2026-12-05/proposals", { tmdbIds: [7, 8, 9] }); // Nov 28 joins the lineup too
     let r = await call("a@x.com", "GET", "/api/state");
-    const before = r.json.upcoming.find((n: any) => n.date === "2026-11-21");
-    // Saturday Nov 21 -> Monday Nov 23 (an open regular night): "Monday instead of Saturday".
-    r = await call("a@x.com", "PUT", "/api/nights/2026-11-21/schedule", { on: "2026-11-23" });
+    const before = brief(r.json).slice(0, 4).map((x: string) => x.slice(11));
+    expect(brief(r.json).slice(0, 4).map((x: string) => x.slice(0, 10))).toEqual(["2026-11-14", "2026-11-21", "2026-11-28", "2026-12-05"]);
+    expect(r.json.upcoming[2].inLineup).toBe(true);
+    expect(r.json.upcoming[2].proposals).toEqual([]);
+
+    r = await call("a@x.com", "PUT", "/api/settings", MON_SAT);
+    // Same nights, same order, same roles and choices; now on the next four dates.
+    expect(brief(r.json).slice(0, 4)).toEqual(
+      ["2026-11-14", "2026-11-16", "2026-11-21", "2026-11-23"].map((d, i) => `${d} ${before[i]}`));
+    expect(r.json.upcoming[1].proposals.map((m: any) => m.id)).toEqual([4, 5, 6]);
+    expect(r.json.upcoming[3].proposals.map((m: any) => m.id)).toEqual([7, 8, 9]);
+    expect(r.json.upcoming[1].time).toBe("20:00");
+    // Open nights continue after the lineup without back-to-back repeats.
+    const n = r.json.upcoming;
+    for (let i = 1; i < n.length; i++) {
+      expect(n[i].proposer.email).not.toBe(n[i - 1].proposer.email);
+      expect(n[i].chooser.email).not.toBe(n[i - 1].chooser.email);
+    }
+  });
+
+  test("proposing ahead keeps every night's roles as shown", async () => {
+    const { call } = setup();
+    await three(call);
+    let r = await call("a@x.com", "PUT", "/api/settings", MON_SAT);
+    const shown = brief(r.json).map((x: string) => x.replace("*", ""));
+    const night = r.json.upcoming[3];
+    r = await call(night.proposer.email, "PUT", `/api/nights/${night.date}/proposals`, { tmdbIds: [1, 2, 3] });
     expect(r.status).toBe(200);
-    const moved = r.json.upcoming.find((n: any) => n.date === "2026-11-21");
-    expect(moved).toMatchObject({ on: "2026-11-23", movedFrom: "2026-11-21" });
-    expect([moved.proposer.email, moved.chooser.email]).toEqual([before.proposer.email, before.chooser.email]);
-    expect(moved.proposals.map((m: any) => m.id)).toEqual([1, 2, 3]);
-    expect(r.json.upcoming.filter((n: any) => n.on === "2026-11-21" || n.on === "2026-11-23")).toHaveLength(1);
-    // Saving the schedule again (e.g. a time change) doesn't undo the move.
-    r = await call("a@x.com", "PUT", "/api/settings", { schedule: [{ weekday: 1, time: "20:00" }, { weekday: 6, time: "19:30" }] });
-    expect(r.json.upcoming.find((n: any) => n.date === "2026-11-21")).toMatchObject({ on: "2026-11-23" });
-    // Another night can't be moved onto it.
-    expect((await call("a@x.com", "PUT", "/api/nights/2026-11-28/schedule", { on: "2026-11-23" })).status).toBe(409);
+    expect(brief(r.json).map((x: string) => x.replace("*", ""))).toEqual(shown);
+    expect(r.json.upcoming.slice(0, 4).every((x: any) => x.inLineup)).toBe(true);
+    expect(r.json.upcoming[4].inLineup).toBe(false);
+  });
+
+  test("changing a night's date moves it; the nights after close up; it can go back", async () => {
+    const { call } = setup();
+    await three(call);
+    await call("a@x.com", "PUT", "/api/settings", MON_SAT);
+    for (const d of ["2026-11-14", "2026-11-16", "2026-11-21"]) {
+      const st = (await call("a@x.com", "GET", "/api/state")).json;
+      const n = st.upcoming.find((x: any) => x.date === d);
+      await call(n.proposer.email, "PUT", `/api/nights/${d}/proposals`, { tmdbIds: [n.date.length, 2, 3].map((x, i) => x + i * 10 + Number(d.slice(8))) });
+    }
+    let r = await call("a@x.com", "GET", "/api/state");
+    const [e1, e2, e3] = r.json.upcoming.slice(0, 3).map((n: any) => n.proposals[0].id);
+    expect((await call("b@x.com", "PUT", "/api/nights/2026-11-14/schedule", { on: "2026-11-20" })).status).toBe(403);
+    expect((await call("a@x.com", "PUT", "/api/nights/2026-11-14/schedule", { on: "2026-11-21" })).status).toBe(409);
+    // Sat Nov 14 -> Fri Nov 20 at 21:00.
+    r = await call("a@x.com", "PUT", "/api/nights/2026-11-14/schedule", { on: "2026-11-20", time: "21:00" });
+    expect(r.status).toBe(200);
+    const by = (st: any) => st.upcoming.slice(0, 3).map((n: any) => `${n.date} ${n.proposals[0]?.id}`);
+    expect(by(r.json)).toEqual([`2026-11-16 ${e2}`, `2026-11-20 ${e1}`, `2026-11-21 ${e3}`]);
+    expect(r.json.upcoming[1]).toMatchObject({ time: "21:00", movedFrom: "2026-11-14", extra: true });
+    // Back to the regular schedule.
+    r = await call("a@x.com", "PUT", "/api/nights/2026-11-20/schedule", { on: null, time: null });
+    expect(by(r.json)).toEqual([`2026-11-14 ${e1}`, `2026-11-16 ${e2}`, `2026-11-21 ${e3}`]);
+    expect(r.json.upcoming[0]).toMatchObject({ time: "19:30", movedFrom: null });
+    // Time only.
+    r = await call("a@x.com", "PUT", "/api/nights/2026-11-16/schedule", { time: "18:45" });
+    expect(r.json.upcoming[1]).toMatchObject({ date: "2026-11-16", time: "18:45", customTime: true });
+  });
+
+  test("skipping a date moves the nights after it up; restoring puts it back", async () => {
+    const { call } = setup();
+    await three(call);
+    await call("a@x.com", "PUT", "/api/settings", MON_SAT);
+    const first = (await call("a@x.com", "GET", "/api/state")).json.upcoming[0];
+    await call(first.proposer.email, "PUT", "/api/nights/2026-11-14/proposals", { tmdbIds: [1, 2, 3] });
+    let r = await call("a@x.com", "PUT", "/api/nights/2026-11-14/skip", {});
+    expect(r.json.upcoming[0]).toMatchObject({ date: "2026-11-16", proposer: { email: first.proposer.email } });
+    expect(r.json.upcoming[0].proposals.map((m: any) => m.id)).toEqual([1, 2, 3]);
+    expect(r.json.skipped).toEqual(["2026-11-14"]);
+    r = await call("a@x.com", "DELETE", "/api/skipped/2026-11-14");
+    expect(r.json.upcoming[0]).toMatchObject({ date: "2026-11-14" });
+    expect(r.json.skipped).toEqual([]);
+  });
+
+  test("nights settle on their dates as time passes; the rotation carries on", async () => {
+    const { call, setDay } = setup();
+    await three(call);
+    await call("a@x.com", "PUT", "/api/settings", MON_SAT);
+    let st = (await call("a@x.com", "GET", "/api/state")).json;
+    const [n1, n2] = st.upcoming;
+    await call(n1.proposer.email, "PUT", `/api/nights/${n1.date}/proposals`, { tmdbIds: [1, 2, 3] });
+    await call(n1.chooser.email, "PUT", `/api/nights/${n1.date}/selection`, { tmdbId: 2 });
+    setDay("2026-11-15");
+    st = (await call("a@x.com", "GET", "/api/state")).json;
+    expect(st.past.map((n: any) => [n.date, n.selectedId])).toEqual([["2026-11-14", 2]]);
+    expect(st.upcoming[0]).toMatchObject({ date: "2026-11-16", proposer: { email: n2.proposer.email }, chooser: { email: n2.chooser.email } });
+    // Monday passes with nothing proposed: that turn carries over to the next night.
+    setDay("2026-11-17");
+    st = (await call("a@x.com", "GET", "/api/state")).json;
+    expect(st.upcoming[0]).toMatchObject({ date: "2026-11-21", proposer: { email: n2.proposer.email } });
+    // A past night's date can be corrected.
+    const r = await call("a@x.com", "PUT", "/api/nights/2026-11-14/schedule", { on: "2026-11-13" });
+    expect(r.json.past[0].date).toBe("2026-11-13");
   });
 
   test("runs of open nights between locked nights are planned without repeats when possible", async () => {
@@ -215,35 +306,6 @@ describe("api", () => {
     expect(r2.status).toBe(200);
     expect(r2.json.upcoming.map((x: any) => `${x.on}:${x.proposer.email}>${x.chooser.email}`))
       .toEqual(r.json.upcoming.map((x: any) => `${x.on}:${x.proposer.email}>${x.chooser.email}`));
-  });
-
-  test("a moved night occupying a new regular date doesn't double up", async () => {
-    const { call } = setup();
-    await call(null, "POST", "/api/setup", { email: "a@x.com", name: "A" });
-    await call("a@x.com", "POST", "/api/participants", { email: "b@x.com", name: "B" });
-    await call("a@x.com", "PUT", "/api/nights/2026-11-28/schedule", { on: "2026-11-16" }); // Sat Nov 28 -> Mon Nov 16
-    const r = await call("a@x.com", "PUT", "/api/settings", { schedule: [{ weekday: 1, time: "19:30" }, { weekday: 6, time: "19:30" }] });
-    // The moved night becomes Monday's night, and Saturday Nov 28 is a regular night again.
-    const on16 = r.json.upcoming.filter((n: any) => n.on === "2026-11-16");
-    expect(on16.map((n: any) => [n.date, n.movedFrom])).toEqual([["2026-11-16", null]]);
-    expect(r.json.upcoming.some((n: any) => n.on === "2026-11-28" && n.date === "2026-11-28")).toBe(true);
-  });
-
-  test("adding a night of the week fits the rotation around locked nights", async () => {
-    const { call } = setup();
-    await call(null, "POST", "/api/setup", { email: "a@x.com", name: "A" });
-    await call("a@x.com", "POST", "/api/participants", { email: "b@x.com", name: "B" });
-    await call("a@x.com", "POST", "/api/participants", { email: "c@x.com", name: "C" });
-    await call("a@x.com", "PUT", "/api/nights/2026-11-14/proposals", { tmdbIds: [1, 2, 3] });  // locks A -> B
-    await call("a@x.com", "PUT", "/api/nights/2026-11-21/proposals", { tmdbIds: [4, 5, 6] });  // locks B -> C
-    const r = await call("a@x.com", "PUT", "/api/settings", { schedule: [{ weekday: 1, time: "19:30" }, { weekday: 6, time: "19:30" }] });
-    const n = r.json.upcoming;
-    expect(n[0]).toMatchObject({ on: "2026-11-14", proposer: { name: "A" }, chooser: { name: "B" } });
-    expect(n[2]).toMatchObject({ on: "2026-11-21", proposer: { name: "B" }, chooser: { name: "C" } });
-    // The Monday between them avoids repeating either neighbour's proposer or chooser where possible.
-    const mon = n[1];
-    expect(mon.on).toBe("2026-11-16");
-    expect([mon.proposer.name, mon.chooser.name]).toEqual(["C", "A"]);
   });
 
   test("tunnel requests without Access config are denied", async () => {
@@ -282,36 +344,6 @@ describe("api", () => {
     const n21 = r.json.upcoming.find((n: any) => n.date === "2026-11-21");
     expect(n21.proposer.email).toBe("bee@x.com");
     expect(n21.chooser.email).not.toBe("c@x.com");
-  });
-
-  test("nights can move off-cycle (open nights are re-planned for their new place)", async () => {
-    const { call } = setup();
-    await call(null, "POST", "/api/setup", { email: "a@x.com", name: "A" });
-    await call("a@x.com", "POST", "/api/participants", { email: "b@x.com", name: "B" });
-    await call("a@x.com", "POST", "/api/participants", { email: "c@x.com", name: "C" });
-    let r = await call("a@x.com", "GET", "/api/state");
-    // Move Nov 21 to Friday Nov 20 at 8pm.
-    r = await call("a@x.com", "PUT", "/api/nights/2026-11-21/schedule", { on: "2026-11-20", time: "20:00" });
-    expect(r.status).toBe(200);
-    const moved = r.json.upcoming.find((n: any) => n.date === "2026-11-21");
-    expect(moved).toMatchObject({ on: "2026-11-20", time: "20:00", movedFrom: "2026-11-21", customTime: true });
-    expect(r.json.upcoming.map((n: any) => n.on).slice(0, 3)).toEqual(["2026-11-14", "2026-11-20", "2026-11-28"]);
-    // Can't land on another night; non-admins can't move nights.
-    expect((await call("a@x.com", "PUT", "/api/nights/2026-11-14/schedule", { on: "2026-11-20" })).status).toBe(409);
-    // Moving onto an open regular night takes it over (one night that date, keeping its roles).
-    r = await call("a@x.com", "PUT", "/api/nights/2026-11-14/schedule", { on: "2026-11-28" });
-    expect(r.status).toBe(200);
-    const on28 = r.json.upcoming.filter((n: any) => n.on === "2026-11-28");
-    expect(on28.map((n: any) => n.date)).toEqual(["2026-11-14"]);
-    await call("a@x.com", "PUT", "/api/nights/2026-11-14/schedule", { on: null });
-    expect((await call("b@x.com", "PUT", "/api/nights/2026-11-14/schedule", { on: "2026-11-13" })).status).toBe(403);
-    // Moving Nov 14 into the past makes it a past night; its rules follow the actual date.
-    r = await call("a@x.com", "PUT", "/api/nights/2026-11-14/schedule", { on: "2026-11-09" });
-    expect(r.json.upcoming.some((n: any) => n.date === "2026-11-14")).toBe(false);
-    expect((await call("a@x.com", "PUT", "/api/nights/2026-11-14/schedule", { on: null })).json.upcoming[0].on).toBe("2026-11-14");
-    // Reset.
-    r = await call("a@x.com", "PUT", "/api/nights/2026-11-21/schedule", { on: null, time: null });
-    expect(r.json.upcoming.find((n: any) => n.date === "2026-11-21")).toMatchObject({ on: "2026-11-21", movedFrom: null, time: "19:30" });
   });
 
   test("proposal history lists passed-over movies from settled nights; search marks watched", async () => {

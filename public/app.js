@@ -85,9 +85,22 @@ function render() {
   const main = $("#main");
   main.innerHTML = `
     <section>${next ? nightHtml(next, true) : `<p class="muted">No upcoming nights.</p>`}</section>
-    ${rest.length ? `<section><h2 class="section-title">Coming up</h2>${rest.map((n) => nightHtml(n, false)).join("")}</section>` : ""}
+    ${rest.length || state.skipped?.length ? `<section><h2 class="section-title">Coming up</h2>${withSkipped(rest)}</section>` : ""}
     ${s.past.length ? `<section><h2 class="section-title">Past nights</h2><div class="past-list">${s.past.map(pastHtml).join("")}</div></section>` : ""}
   `;
+}
+
+// Upcoming nights with any skipped dates shown where they fall.
+function withSkipped(nights) {
+  const items = [...nights.map((n) => ({ date: n.date, html: nightHtml(n, false) })),
+    ...(state.skipped ?? []).map((d) => ({ date: d, html: skippedHtml(d) }))];
+  return items.sort((a, b) => a.date.localeCompare(b.date)).map((x) => x.html).join("");
+}
+function skippedHtml(date) {
+  return `<div class="skipped-row">
+    <span><s>${esc(fmtDate(date, { weekday: "short", month: "short", day: "numeric" }))}</s> skipped</span>
+    ${state.me.isAdmin ? `<button class="link-btn" data-action="unskip" data-date="${date}">Restore</button>` : ""}
+  </div>`;
 }
 
 function statusHtml(n) {
@@ -157,7 +170,7 @@ function nightHtml(n, isNext) {
   if (canPropose) actions.push(`<button class="btn ${n.proposals.length ? "" : "primary"}" data-action="propose" data-date="${n.date}">${n.proposals.length ? "Change proposals" : "Propose movies"}</button>`);
   if (n.canOverride) {
     actions.push(`<button class="btn ghost small" data-action="override" data-date="${n.date}" aria-pressed="${override}">${override ? "Done overriding" : "Admin override"}</button>`);
-    if (override) actions.push(`<button class="btn ghost small" data-action="roles" data-date="${n.date}">Edit roles${n.rolesOverridden ? " (overridden)" : ""}</button>`);
+    if (override) actions.push(`<button class="btn ghost small" data-action="roles" data-date="${n.date}">Edit roles</button>`);
   }
 
   return `<article class="night ${isNext ? "next" : ""} ${override ? "overriding" : ""}" data-date="${n.date}">
@@ -500,11 +513,11 @@ function openRoles(date) {
   const n = state.upcoming.find((x) => x.date === date) ?? state.past.find((x) => x.date === date);
   rolesDate = date;
   $("#roles-date").textContent = fmtDate(n.on, { weekday: "short", month: "short", day: "numeric" });
-  const opts = (sel) => `<option value="">Follow rotation</option>` + state.participants.filter((p) => p.active)
+  const opts = (sel) => state.participants.filter((p) => p.active)
     .map((p) => `<option value="${esc(p.email)}" ${sel === p.email ? "selected" : ""}>${esc(p.name)}</option>`).join("");
   const f = $("#roles-form");
-  f.proposer.innerHTML = opts(n.rolesOverridden ? n.proposer?.email : "");
-  f.chooser.innerHTML = opts(n.rolesOverridden ? n.chooser?.email : "");
+  f.proposer.innerHTML = opts(n.proposer?.email);
+  f.chooser.innerHTML = opts(n.chooser?.email);
   rolesDlg.showModal();
 }
 $("#roles-save").addEventListener("click", async () => {
@@ -522,8 +535,13 @@ function openSchedule(date) {
   const f = $("#schedule-form");
   f.on.value = n.on;
   f.time.value = n.time;
-  $("#schedule-regular").textContent = `Regular schedule: ${fmtDate(n.date, { weekday: "long", month: "short", day: "numeric" })} at ${fmtTime(n.regularTime)}.`;
-  $("#schedule-reset").hidden = !n.movedFrom && !n.customTime;
+  $("#schedule-regular").textContent = n.isPast ? "Correct the date this night happened on."
+    : n.movedFrom ? `Moved from ${fmtDate(n.movedFrom, { weekday: "long", month: "short", day: "numeric" })}.`
+    : n.extra ? "An extra night, off the weekly schedule." : `Regular start time: ${fmtTime(n.regularTime)}.`;
+  $("#schedule-help").hidden = n.isPast;
+  f.time.closest("label").hidden = n.isPast;
+  $("#schedule-reset").hidden = n.isPast || (!n.movedFrom && !n.customTime);
+  $("#schedule-skip").hidden = n.isPast;
   scheduleDlg.showModal();
 }
 $("#schedule-save").addEventListener("click", async () => {
@@ -531,6 +549,11 @@ $("#schedule-save").addEventListener("click", async () => {
   if (!f.on.value || !f.time.value) return toast("Pick a date and time", true);
   if (f.on.value < state.today && !confirm(`${fmtDate(f.on.value, { weekday: "long", month: "short", day: "numeric" })} has already passed. Move this night into the past?`)) return;
   if (await act(() => api("PUT", `/api/nights/${scheduleDate}/schedule`, { on: f.on.value, time: f.time.value }), "Night updated")) scheduleDlg.close();
+});
+$("#schedule-skip").addEventListener("click", async () => {
+  const label = fmtDate(scheduleDate, { weekday: "long", month: "short", day: "numeric" });
+  if (!confirm(`Skip ${label}? No movie night that day; this night and the ones after it move to the next dates.`)) return;
+  if (await act(() => api("PUT", `/api/nights/${scheduleDate}/skip`, {}), `${label} skipped`)) scheduleDlg.close();
 });
 $("#schedule-reset").addEventListener("click", async () => {
   if (await act(() => api("PUT", `/api/nights/${scheduleDate}/schedule`, { on: null, time: null }), "Back on the regular schedule")) scheduleDlg.close();
@@ -641,6 +664,7 @@ document.addEventListener("click", async (e) => {
     case "propose": return openPropose(date);
     case "roles": return openRoles(date);
     case "schedule": return openSchedule(date);
+    case "unskip": return act(() => api("DELETE", `/api/skipped/${date}`), "Date restored");
     case "override": overriding.has(date) ? overriding.delete(date) : overriding.add(date); return render();
     case "settings": return openSettings();
     case "pick": hidePop(); return act(() => api("PUT", `/api/nights/${date}/selection`, { tmdbId: Number(id) }), "Picked!");
