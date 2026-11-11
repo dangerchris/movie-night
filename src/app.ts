@@ -291,15 +291,16 @@ export function createApp({ db, auth, movies, adminEmails, library = null, now =
   }
 
   /**
-   * A night moved onto a date that is (now) a regular night with nothing of its own becomes that
-   * date's night, so its original date is free to be a regular night again. E.g. a Saturday night
-   * moved to a Monday, after Mondays become regular nights.
+   * When a weekday is added to the schedule, nights that had been moved onto that weekday become
+   * that date's regular night, so their original dates are free to be regular nights again. E.g. a
+   * Saturday night moved to a Monday, then Mondays become regular nights. (Nights moved onto an
+   * already-regular date stay moves: "Monday instead of Saturday this week".)
    */
-  function adoptMovedNights(s: Settings) {
+  function adoptMovedNights(added: number[]) {
     const moved = db.query<NightRow, []>("SELECT * FROM nights WHERE actual_date IS NOT NULL").all();
     for (const r of moved) {
       const on = r.actual_date!;
-      if (!weekdays(s).includes(weekdayOf(on)) || q.night.get(on)) continue;
+      if (!added.includes(weekdayOf(on)) || q.night.get(on)) continue;
       db.query("UPDATE proposals SET night_date = ? WHERE night_date = ?").run(on, r.date);
       db.query("UPDATE nights SET date = ?, actual_date = NULL WHERE date = ?").run(on, r.date);
     }
@@ -671,9 +672,8 @@ export function createApp({ db, auth, movies, adminEmails, library = null, now =
     if ("on" in b) {
       const on = b.on === null || b.on === "" ? slot : String(b.on);
       if (!isIsoDate(on)) throw new HttpError(400, "bad_date", "Pick a valid date");
-      const clash = q.nightOn.get(on, slot)
-        ?? (on !== slot && weekdays(s).includes(weekdayOf(on)) && !q.night.get(on)?.actual_date ? { date: on } : null);
-      if (clash) throw new HttpError(409, "date_taken", "There's already a movie night on that date");
+      // Moving onto an open regular night takes it over; a night with anything stored can't be doubled up.
+      if (q.nightOn.get(on, slot)) throw new HttpError(409, "date_taken", "There's already a movie night with plans on that date");
       actual = on === slot ? null : on;
     }
     if ("time" in b) {
@@ -779,6 +779,7 @@ export function createApp({ db, auth, movies, adminEmails, library = null, now =
     const b = await body(c);
     const s = getSettings();
     const updates: [string, string][] = [];
+    let added: number[] = [];
     if ("title" in b) {
       const t = String(b.title ?? "").trim();
       if (!t || t.length > 60) throw new HttpError(400, "bad_title");
@@ -794,6 +795,7 @@ export function createApp({ db, auth, movies, adminEmails, library = null, now =
       sched.sort((x, y) => x.weekday - y.weekday);
       const daysChanged = weekdays(s).slice().sort().join() !== sched.map((d) => d.weekday).join();
       updates.push(["schedule", JSON.stringify(sched)]);
+      added = sched.map((d) => d.weekday).filter((w) => !weekdays(s).includes(w));
       if (daysChanged) {
         const start = rotationStart(s, { ...s, schedule: sched });
         updates.push(["rotation_anchor", start.anchor], ["rotation_base", String(start.base)]);
@@ -810,7 +812,7 @@ export function createApp({ db, auth, movies, adminEmails, library = null, now =
     }
     db.transaction(() => {
       updates.forEach(([k, v]) => q.putSetting.run(k, v));
-      if ("schedule" in b) adoptMovedNights(getSettings());
+      if (added.length) adoptMovedNights(added);
     })();
     return c.json(stateView(me));
   });
