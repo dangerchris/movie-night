@@ -93,6 +93,9 @@ export function createApp({ db, auth, movies, adminEmails, library = null, now =
       `SELECT n.* FROM nights n WHERE COALESCE(n.actual_date, n.date) < ?
          AND (n.selected_tmdb_id IS NOT NULL OR EXISTS (SELECT 1 FROM proposals p WHERE p.night_date = n.date))
        ORDER BY COALESCE(n.actual_date, n.date) DESC LIMIT ?`),
+    recentRoles: db.query<NightRow, [string]>(
+      `SELECT * FROM nights WHERE COALESCE(actual_date, date) < ? AND proposer_email IS NOT NULL AND chooser_email IS NOT NULL
+       ORDER BY COALESCE(actual_date, date) DESC, date DESC LIMIT 3`),
     lastRolesBefore: db.query<NightRow, [string]>(
       `SELECT * FROM nights WHERE COALESCE(actual_date, date) < ? AND proposer_email IS NOT NULL AND chooser_email IS NOT NULL
        ORDER BY COALESCE(actual_date, date) DESC, date DESC LIMIT 1`),
@@ -205,8 +208,9 @@ export function createApp({ db, auth, movies, adminEmails, library = null, now =
     let ptr = prev && indexOf.has(key(prev)) ? indexOf.get(key(prev))!
       : nights.length ? rotationIndex(nights[0].slot, s) - 1 : 0;
 
-    // Cost of putting `b` right after `a`: a repeated proposer or chooser on consecutive nights, and
-    // (with 4+ people) the previous chooser proposing next.
+    // Cost of putting `b` right after `a`: a repeated proposer or chooser on consecutive nights (2 each),
+    // and (with 4+ people) the previous chooser proposing next (1). Reusing a pairing from the last
+    // few nights also costs 1, so back-to-back repeats matter most and variety breaks the rest.
     const cost = (a: Roles | null, b: Roles | null) => !a || !b ? 0
       : +(a.proposer === b.proposer) * 2 + +(a.chooser === b.chooser) * 2 + (n >= 4 && a.chooser === b.proposer ? 1 : 0);
     const isFull = (f: Roles) => !!(f.proposer && f.chooser);
@@ -214,10 +218,16 @@ export function createApp({ db, auth, movies, adminEmails, library = null, now =
       Array.from({ length: cycle.length }, (_, j) => cycle[(((from + 1 + j) % cycle.length) + cycle.length) % cycle.length])
         .filter((c) => (!f.proposer || c.proposer === f.proposer) && (!f.chooser || c.chooser === f.chooser));
 
+    // Recent pairings (most recent last), so the planner can prefer variety.
+    const recent: string[] = q.recentRoles.all(today).reverse().map((r) => `${r.proposer_email}>${r.chooser_email}`);
+    const RECENT = 3;
+    const reused = (c: Roles, hist: string[]) => (hist.slice(-RECENT).includes(key(c)) ? 1 : 0);
+
     let i = 0;
     while (i < nights.length) {
       if (isFull(fixed[i])) {
         prev = fixed[i];
+        recent.push(key(prev));
         out.set(nights[i].slot, prev);
         if (indexOf.has(key(prev))) ptr = indexOf.get(key(prev))!;
         i++;
@@ -234,7 +244,7 @@ export function createApp({ db, auth, movies, adminEmails, library = null, now =
         const dfs = (t: number, before: Roles | null, from: number, score: number, picks: Roles[]) => {
           if (score >= best.score || --budget < 0) return;
           if (t === run.length) {
-            const total = score + cost(before, after);
+            const total = score + cost(before, after) + (after ? reused(after, [...recent, ...picks.map(key)]) : 0);
             if (total < best.score) best = { score: total, picks: [...picks] };
             return;
           }
@@ -243,7 +253,8 @@ export function createApp({ db, auth, movies, adminEmails, library = null, now =
           if (!cands.length) cands.push({ proposer: f.proposer ?? cycle[0].proposer, chooser: f.chooser ?? cycle[0].chooser });
           for (const c of cands) {
             picks.push(c);
-            dfs(t + 1, c, indexOf.get(key(c)) ?? from + 1, score + cost(before, c), picks);
+            const variety = reused(c, [...recent, ...picks.slice(0, -1).map(key)]);
+            dfs(t + 1, c, indexOf.get(key(c)) ?? from + 1, score + cost(before, c) + variety, picks);
             picks.pop();
           }
         };
@@ -256,6 +267,7 @@ export function createApp({ db, auth, movies, adminEmails, library = null, now =
       for (const [a, b] of runs) {
         solve(fixed.slice(a, b), b === j ? next : null).forEach((pick, k) => {
           out.set(nights[a + k].slot, pick);
+          recent.push(key(pick));
           prev = pick;
           ptr = indexOf.get(key(pick)) ?? ptr + 1;
         });
@@ -276,6 +288,21 @@ export function createApp({ db, auth, movies, adminEmails, library = null, now =
     const planned = upcoming ? plan(s, addDays(on, 31)).get(date) : null;
     const rot = planned ?? rotationRoles(rotationIndex(date, s), order);
     return { proposer: stored.proposer ?? rot.proposer, chooser: stored.chooser ?? rot.chooser };
+  }
+
+  /**
+   * A night moved onto a date that is (now) a regular night with nothing of its own becomes that
+   * date's night, so its original date is free to be a regular night again. E.g. a Saturday night
+   * moved to a Monday, after Mondays become regular nights.
+   */
+  function adoptMovedNights(s: Settings) {
+    const moved = db.query<NightRow, []>("SELECT * FROM nights WHERE actual_date IS NOT NULL").all();
+    for (const r of moved) {
+      const on = r.actual_date!;
+      if (!weekdays(s).includes(weekdayOf(on)) || q.night.get(on)) continue;
+      db.query("UPDATE proposals SET night_date = ? WHERE night_date = ?").run(on, r.date);
+      db.query("UPDATE nights SET date = ?, actual_date = NULL WHERE date = ?").run(on, r.date);
+    }
   }
 
   /**
@@ -781,7 +808,10 @@ export function createApp({ db, auth, movies, adminEmails, library = null, now =
       if (!/^[A-Z]{2}$/.test(r)) throw new HttpError(400, "bad_region");
       updates.push(["region", r]);
     }
-    db.transaction(() => updates.forEach(([k, v]) => q.putSetting.run(k, v)))();
+    db.transaction(() => {
+      updates.forEach(([k, v]) => q.putSetting.run(k, v));
+      if ("schedule" in b) adoptMovedNights(getSettings());
+    })();
     return c.json(stateView(me));
   });
 

@@ -200,8 +200,10 @@ describe("api", () => {
     await call("a@x.com", "POST", "/api/participants", { email: "b@x.com", name: "B" });
     await call("a@x.com", "PUT", "/api/nights/2026-11-28/schedule", { on: "2026-11-16" }); // Sat Nov 28 -> Mon Nov 16
     const r = await call("a@x.com", "PUT", "/api/settings", { schedule: [{ weekday: 1, time: "19:30" }, { weekday: 6, time: "19:30" }] });
+    // The moved night becomes Monday's night, and Saturday Nov 28 is a regular night again.
     const on16 = r.json.upcoming.filter((n: any) => n.on === "2026-11-16");
-    expect(on16.map((n: any) => n.date)).toEqual(["2026-11-28"]);
+    expect(on16.map((n: any) => [n.date, n.movedFrom])).toEqual([["2026-11-16", null]]);
+    expect(r.json.upcoming.some((n: any) => n.on === "2026-11-28" && n.date === "2026-11-28")).toBe(true);
   });
 
   test("adding a night of the week fits the rotation around locked nights", async () => {
