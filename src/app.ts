@@ -35,7 +35,12 @@ interface NightRow {
   selected_tmdb_id: number | null;
   selected_by: string | null;
   selected_at: string | null;
+  actual_date: string | null; // set when the night was moved off its regular date
+  time: string | null;        // set when the night has its own start time
 }
+
+/** The date a night actually happens on. `slot` is its regular (rotation) date. */
+const onDate = (slot: string, row: NightRow | null) => row?.actual_date ?? slot;
 
 interface Settings {
   title: string;
@@ -78,11 +83,23 @@ export function createApp({ db, auth, movies, adminEmails, now = () => new Date(
     activeOrder: db.query<{ email: string }, []>("SELECT email FROM participants WHERE active = 1 ORDER BY position, name"),
     maxPos: db.query<{ m: number | null }, []>("SELECT MAX(position) AS m FROM participants"),
     night: db.query<NightRow, [string]>("SELECT * FROM nights WHERE date = ?"),
-    nightsFrom: db.query<NightRow, [string]>("SELECT * FROM nights WHERE date >= ? ORDER BY date"),
+    nightsFrom: db.query<NightRow, [string]>("SELECT * FROM nights WHERE COALESCE(actual_date, date) >= ?"),
     pastNights: db.query<NightRow, [string, number]>(
-      `SELECT n.* FROM nights n WHERE n.date < ?
+      `SELECT n.* FROM nights n WHERE COALESCE(n.actual_date, n.date) < ?
          AND (n.selected_tmdb_id IS NOT NULL OR EXISTS (SELECT 1 FROM proposals p WHERE p.night_date = n.date))
-       ORDER BY n.date DESC LIMIT ?`),
+       ORDER BY COALESCE(n.actual_date, n.date) DESC LIMIT ?`),
+    nightOn: db.query<{ date: string }, [string, string]>(
+      "SELECT date FROM nights WHERE COALESCE(actual_date, date) = ? AND date != ?"),
+    // Movies proposed on other nights that were never picked anywhere, newest first.
+    proposalHistory: db.query<{ tmdb_id: number; night: string; on_date: string; proposed_by: string | null; times: number }, [string]>(
+      `SELECT p.tmdb_id, p.night_date AS night, COALESCE(n.actual_date, n.date) AS on_date, p.proposed_by,
+              COUNT(*) OVER (PARTITION BY p.tmdb_id) AS times
+         FROM proposals p JOIN nights n ON n.date = p.night_date
+        WHERE p.night_date != ?
+          AND p.tmdb_id NOT IN (SELECT selected_tmdb_id FROM nights WHERE selected_tmdb_id IS NOT NULL)
+        ORDER BY on_date DESC, p.slot`),
+    picked: db.query<{ id: number; on_date: string }, []>(
+      "SELECT selected_tmdb_id AS id, COALESCE(actual_date, date) AS on_date FROM nights WHERE selected_tmdb_id IS NOT NULL"),
     proposals: db.query<{ slot: number; tmdb_id: number; proposed_by: string | null }, [string]>(
       "SELECT slot, tmdb_id, proposed_by FROM proposals WHERE night_date = ? ORDER BY slot"),
     cachedMovie: db.query<{ data: string; fetched_at: number }, [number]>("SELECT data, fetched_at FROM movies WHERE tmdb_id = ?"),
@@ -132,7 +149,7 @@ export function createApp({ db, auth, movies, adminEmails, now = () => new Date(
   function rolesFor(date: string, s: Settings, row: NightRow | null) {
     const order = q.activeOrder.all().map((p) => p.email);
     const rot = rotationRoles(date, s.rotationAnchor, order);
-    const upcoming = date >= todayInTz(s.timezone, now());
+    const upcoming = onDate(date, row) >= todayInTz(s.timezone, now());
     const keep = (e: string | null | undefined) => (e && (!upcoming || order.includes(e)) ? e : null);
     return { proposer: keep(row?.proposer_email) ?? rot.proposer, chooser: keep(row?.chooser_email) ?? rot.chooser };
   }
@@ -164,14 +181,18 @@ export function createApp({ db, auth, movies, adminEmails, now = () => new Date(
     const roles = rolesFor(date, s, row);
     const proposals = q.proposals.all(date).map((p) => movieView(cachedMovie(p.tmdb_id), s.region));
     const selectedId = row?.selected_tmdb_id ?? null;
-    const isPast = date < today;
+    const on = onDate(date, row);
+    const isPast = on < today;
     const admin = !!me.is_admin;
     const full = proposals.length === PROPOSAL_COUNT;
     return {
-      date,
-      time: s.nightTime,
+      date,              // rotation slot; identifies the night in the API
+      on,                // the date it actually happens
+      time: row?.time ?? s.nightTime,
+      movedFrom: row?.actual_date ? date : null,
+      customTime: !!row?.time,
       isPast,
-      isToday: date === today,
+      isToday: on === today,
       proposer: personView(roles.proposer, names),
       chooser: personView(roles.chooser, names),
       proposals,
@@ -192,7 +213,9 @@ export function createApp({ db, auth, movies, adminEmails, now = () => new Date(
     const names = new Map(all.map((p) => [p.email, p.name]));
     const dates = new Set(upcomingNightDates(today, s.nightWeekday, UPCOMING_COUNT));
     for (const r of q.nightsFrom.all(today)) dates.add(r.date); // off-schedule nights with data
-    const upcoming = [...dates].sort().map((d) => nightView(d, s, today, me, names));
+    const upcoming = [...dates].map((d) => nightView(d, s, today, me, names))
+      .filter((n) => !n.isPast) // regular dates whose night was moved earlier
+      .sort((x, y) => x.on.localeCompare(y.on) || x.date.localeCompare(y.date));
     const past = q.pastNights.all(today, PAST_COUNT).map((r) => nightView(r.date, s, today, me, names));
     return {
       settings: s,
@@ -310,11 +333,32 @@ export function createApp({ db, auth, movies, adminEmails, now = () => new Date(
 
   app.get("/api/state", (c) => c.json(stateView(requireMe(c))));
 
+  const watchedMap = () => new Map(q.picked.all().map((r) => [r.id, r.on_date]));
+
   app.get("/api/search", async (c) => {
     requireMe(c);
     const query = (c.req.query("q") ?? "").trim();
     if (query.length < 2) return c.json({ results: [] });
-    return c.json({ results: await movies.search(query) });
+    const watched = watchedMap();
+    const results = await movies.search(query);
+    return c.json({ results: results.map((r) => ({ ...r, watched: watched.get(r.id) ?? null })) });
+  });
+
+  // Movies proposed before (on other nights) and never picked: ready-made options for the proposer.
+  app.get("/api/proposal-history", (c) => {
+    requireMe(c);
+    const s = getSettings();
+    const names = new Map(q.participants.all().map((p) => [p.email, p.name]));
+    const exclude = c.req.query("exclude") ?? "";
+    const seen = new Set<number>();
+    const movies = [];
+    for (const r of q.proposalHistory.all(exclude)) {
+      if (seen.has(r.tmdb_id)) continue;
+      seen.add(r.tmdb_id);
+      const m = movieView(cachedMovie(r.tmdb_id), s.region);
+      movies.push({ ...m, lastProposed: r.on_date, proposedBy: r.proposed_by ? names.get(r.proposed_by) ?? r.proposed_by : null, times: r.times });
+    }
+    return c.json({ movies });
   });
 
   app.get("/api/movie/:id", async (c) => {
@@ -339,7 +383,7 @@ export function createApp({ db, auth, movies, adminEmails, now = () => new Date(
     const roles = rolesFor(date, s, row);
     const admin = !!me.is_admin;
     if (roles.proposer !== me.email && !admin) throw new HttpError(403, "not_proposer", "You are not the proposer for this night");
-    if (date < today && !admin) throw new HttpError(409, "past", "That night has passed");
+    if (onDate(date, row) < today && !admin) throw new HttpError(409, "past", "That night has passed");
     if (row?.selected_tmdb_id && !admin) throw new HttpError(409, "already_selected", "A movie has already been picked");
 
     const { tmdbIds } = await body(c);
@@ -371,7 +415,7 @@ export function createApp({ db, auth, movies, adminEmails, now = () => new Date(
     const roles = rolesFor(date, s, row);
     const admin = !!me.is_admin;
     if (roles.chooser !== me.email && !admin) throw new HttpError(403, "not_chooser", "You are not the chooser for this night");
-    if (date < today && !admin) throw new HttpError(409, "past", "That night has passed");
+    if (onDate(date, row) < today && !admin) throw new HttpError(409, "past", "That night has passed");
     const proposed = q.proposals.all(date).map((p) => p.tmdb_id);
     if (proposed.length !== PROPOSAL_COUNT) throw new HttpError(409, "no_proposals", "The proposer hasn't set the movies yet");
 
@@ -384,6 +428,35 @@ export function createApp({ db, auth, movies, adminEmails, now = () => new Date(
       db.query("UPDATE nights SET selected_tmdb_id = ?, selected_by = ?, selected_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE date = ?")
         .run(id, me.email, date);
     }
+    return c.json(stateView(me));
+  });
+
+  // Move a night off its regular date and/or give it its own start time (null resets either).
+  app.put("/api/nights/:date/schedule", async (c) => {
+    const me = requireAdmin(c);
+    const s = getSettings();
+    const slot = nightDate(c, s);
+    const b = await body(c);
+    const row = q.night.get(slot);
+    let actual = row?.actual_date ?? null;
+    let time = row?.time ?? null;
+    if ("on" in b) {
+      const on = b.on === null || b.on === "" ? slot : String(b.on);
+      if (!isIsoDate(on)) throw new HttpError(400, "bad_date", "Pick a valid date");
+      const clash = q.nightOn.get(on, slot)
+        ?? (on !== slot && weekdayOf(on) === s.nightWeekday && !q.night.get(on)?.actual_date ? { date: on } : null);
+      if (clash) throw new HttpError(409, "date_taken", "There's already a movie night on that date");
+      actual = on === slot ? null : on;
+    }
+    if ("time" in b) {
+      if (b.time === null || b.time === "") time = null;
+      else if (/^([01]\d|2[0-3]):[0-5]\d$/.test(String(b.time))) time = String(b.time) === s.nightTime ? null : String(b.time);
+      else throw new HttpError(400, "bad_time", "Pick a valid time");
+    }
+    db.transaction(() => {
+      q.ensureNight.run(slot);
+      db.query("UPDATE nights SET actual_date = ?, time = ?, updated_at = CURRENT_TIMESTAMP WHERE date = ?").run(actual, time, slot);
+    })();
     return c.json(stateView(me));
   });
 

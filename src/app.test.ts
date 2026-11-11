@@ -5,7 +5,7 @@ import { rotationRoles, upcomingNightDates } from "./schedule.ts";
 import type { MovieSource } from "./tmdb.ts";
 
 const fakeMovies: MovieSource = {
-  async search(q) { return [{ id: 1, title: q, year: "2000", posterPath: null, overview: "", rating: 7 }]; },
+  async search(q) { return [1, 2].map((id) => ({ id, title: q, year: "2000", posterPath: null, overview: "", rating: 7 })); },
   async details(id) {
     if (id === 404) throw Object.assign(new Error("nope"), { status: 404 });
     return {
@@ -179,6 +179,48 @@ describe("api", () => {
     const n21 = r.json.upcoming.find((n: any) => n.date === "2026-11-21");
     expect(n21.proposer.email).toBe("bee@x.com");
     expect(n21.chooser.email).not.toBe("c@x.com");
+  });
+
+  test("nights can move off-cycle and keep their rotation slot", async () => {
+    const { call } = setup();
+    await call(null, "POST", "/api/setup", { email: "a@x.com", name: "A" });
+    await call("a@x.com", "POST", "/api/participants", { email: "b@x.com", name: "B" });
+    await call("a@x.com", "POST", "/api/participants", { email: "c@x.com", name: "C" });
+    let r = await call("a@x.com", "GET", "/api/state");
+    const before = r.json.upcoming[1]; // Nov 21 slot
+    // Move Nov 21 to Friday Nov 20 at 8pm.
+    r = await call("a@x.com", "PUT", "/api/nights/2026-11-21/schedule", { on: "2026-11-20", time: "20:00" });
+    expect(r.status).toBe(200);
+    const moved = r.json.upcoming.find((n: any) => n.date === "2026-11-21");
+    expect(moved).toMatchObject({ on: "2026-11-20", time: "20:00", movedFrom: "2026-11-21", customTime: true });
+    expect(moved.proposer.email).toBe(before.proposer.email);
+    expect(r.json.upcoming.map((n: any) => n.on).slice(0, 3)).toEqual(["2026-11-14", "2026-11-20", "2026-11-28"]);
+    // Can't land on another night; non-admins can't move nights.
+    expect((await call("a@x.com", "PUT", "/api/nights/2026-11-14/schedule", { on: "2026-11-20" })).status).toBe(409);
+    expect((await call("a@x.com", "PUT", "/api/nights/2026-11-14/schedule", { on: "2026-11-28" })).status).toBe(409);
+    expect((await call("b@x.com", "PUT", "/api/nights/2026-11-14/schedule", { on: "2026-11-13" })).status).toBe(403);
+    // Moving Nov 14 into the past makes it a past night; its rules follow the actual date.
+    r = await call("a@x.com", "PUT", "/api/nights/2026-11-14/schedule", { on: "2026-11-09" });
+    expect(r.json.upcoming.some((n: any) => n.date === "2026-11-14")).toBe(false);
+    expect((await call("a@x.com", "PUT", "/api/nights/2026-11-14/schedule", { on: null })).json.upcoming[0].on).toBe("2026-11-14");
+    // Reset.
+    r = await call("a@x.com", "PUT", "/api/nights/2026-11-21/schedule", { on: null, time: null });
+    expect(r.json.upcoming.find((n: any) => n.date === "2026-11-21")).toMatchObject({ on: "2026-11-21", movedFrom: null, time: "19:30" });
+  });
+
+  test("proposal history lists unpicked movies from other nights; search marks watched", async () => {
+    const { call } = setup();
+    await call(null, "POST", "/api/setup", { email: "a@x.com", name: "A" });
+    await call("a@x.com", "PUT", "/api/nights/2026-11-14/proposals", { tmdbIds: [1, 2, 3] });
+    await call("a@x.com", "PUT", "/api/nights/2026-11-14/selection", { tmdbId: 2 });
+    await call("a@x.com", "PUT", "/api/nights/2026-11-21/proposals", { tmdbIds: [3, 4, 5] });
+    let r = await call("a@x.com", "GET", "/api/proposal-history?exclude=2026-11-28");
+    expect(r.json.movies.map((m: any) => m.id)).toEqual([3, 4, 5, 1]); // newest first, 2 was picked, 3 deduped
+    expect(r.json.movies[0]).toMatchObject({ lastProposed: "2026-11-21", proposedBy: "A", times: 2 });
+    r = await call("a@x.com", "GET", "/api/proposal-history?exclude=2026-11-21");
+    expect(r.json.movies.map((m: any) => m.id)).toEqual([1, 3]);
+    r = await call("a@x.com", "GET", "/api/search?q=thing");
+    expect(r.json.results.map((m: any) => m.watched)).toEqual([null, "2026-11-14"]);
   });
 
   test("non-admins can rename only themselves", async () => {

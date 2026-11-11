@@ -40,6 +40,11 @@ const MIGRATIONS: string[] = [
     fetched_at INTEGER NOT NULL
   );
   `,
+  // Off-cycle nights: a night keeps its rotation slot (nights.date) but can happen on another date/time.
+  `
+  ALTER TABLE nights ADD COLUMN actual_date TEXT;
+  ALTER TABLE nights ADD COLUMN time TEXT;
+  `,
 ];
 
 export function openDb(path: string): Database {

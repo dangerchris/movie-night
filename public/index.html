@@ -54,6 +54,23 @@
     </form>
   </dialog>
 
+  <dialog id="schedule-dialog" class="dialog">
+    <form method="dialog" class="dialog-body" id="schedule-form">
+      <header class="dialog-head">
+        <h2>Change date</h2>
+        <button class="icon-btn" value="cancel" aria-label="Close">&times;</button>
+      </header>
+      <label class="field">Date <input name="on" type="date" required></label>
+      <label class="field">Start time <input name="time" type="time" required></label>
+      <p class="muted small" id="schedule-regular"></p>
+      <p class="muted small">The proposer and chooser stay the same; only when it happens changes.</p>
+      <footer class="dialog-foot">
+        <button type="button" class="btn ghost small" id="schedule-reset">Back to regular schedule</button>
+        <button type="button" class="btn primary" id="schedule-save">Save</button>
+      </footer>
+    </form>
+  </dialog>
+
   <dialog id="settings-dialog" class="dialog wide">
     <div class="dialog-body">
       <header class="dialog-head">

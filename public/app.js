@@ -164,10 +164,12 @@ function nightHtml(n, isNext) {
   return `<article class="night ${isNext ? "next" : ""} ${override ? "overriding" : ""}" data-date="${n.date}">
     <div class="night-head">
       <div class="night-date">
-        <span class="day">${esc(fmtDate(n.date, { weekday: "short", month: "short", day: "numeric" }))}</span>
+        <span class="day">${esc(fmtDate(n.on, { weekday: "short", month: "short", day: "numeric" }))}</span>
         <span class="time">${esc(fmtTime(n.time))}</span>
         ${badge}${picked ? `<span class="badge picked">Picked</span>` : ""}
+        ${n.movedFrom ? `<span class="moved">moved from ${esc(fmtDate(n.movedFrom, { weekday: "short", month: "short", day: "numeric" }))}</span>` : ""}
       </div>
+      ${n.canOverride ? `<button class="btn ghost small" data-action="schedule" data-date="${n.date}">Change date</button>` : ""}
     </div>
     ${turnsHtml(n)}
     <p class="status">${statusHtml(n)}</p>
@@ -178,7 +180,7 @@ function nightHtml(n, isNext) {
 
 function pastHtml(n) {
   const m = n.proposals.find((p) => p.id === n.selectedId);
-  const date = fmtDate(n.date, { month: "short", day: "numeric", year: "numeric" });
+  const date = fmtDate(n.on, { month: "short", day: "numeric", year: "numeric" });
   if (!m) return `<div class="past-item"><div class="slot-empty">-</div><div class="meta"><b>No pick</b>${esc(date)}</div></div>`;
   return `<div class="past-item">${posterHtml(m, { size: "w185" })}<div class="meta"><b>${esc(m.title)}</b>${esc(date)} · ${esc(n.chooser?.name ?? "")}</div></div>`;
 }
@@ -381,12 +383,41 @@ function openPropose(date) {
   const n = state.upcoming.find((x) => x.date === date) ?? state.past.find((x) => x.date === date);
   draftDate = date;
   draft = n.proposals.map((m) => ({ ...m }));
-  $("#propose-date").textContent = fmtDate(date, { weekday: "short", month: "short", day: "numeric" });
+  $("#propose-date").textContent = fmtDate(n.on, { weekday: "short", month: "short", day: "numeric" });
   $("#search-input").value = "";
-  $("#search-results").innerHTML = `<p class="muted small">Search for a movie, then click it to add it to a slot.</p>`;
+  pastProposals = null;
+  showHistory();
   renderDraft();
   proposeDlg.showModal();
   $("#search-input").focus();
+  api("GET", `/api/proposal-history?exclude=${date}`).then(({ movies }) => {
+    pastProposals = movies;
+    for (const m of movies) movieCache.set(m.id, m);
+    if ($("#search-input").value.trim().length < 2) showHistory();
+  }).catch(() => { pastProposals = []; showHistory(); });
+}
+
+let pastProposals = null; // previously proposed, never-picked movies (null while loading)
+const known = new Map(); // id -> movie for anything shown in the results area
+
+function resultHtml(m, caption) {
+  return `<button type="button" class="result" data-action="draft-add" data-id="${m.id}">
+    ${posterHtml(m, { size: "w185" }).replace("<button", "<span").replace(/<\/button>$/, "</span>")}
+    <span class="poster-title">${esc(m.title)} <span class="yr">${esc(m.year ?? "")}</span></span>
+    ${caption ? `<span class="result-caption">${caption}</span>` : ""}
+  </button>`;
+}
+
+function showHistory() {
+  searchSeq++; // drop any in-flight search
+  const box = $("#search-results");
+  if (pastProposals === null) { box.innerHTML = `<p class="muted small">Loading previously proposed movies…</p>`; return; }
+  if (!pastProposals.length) { box.innerHTML = `<p class="muted small">Search for a movie, then click it to add it to a slot.</p>`; return; }
+  for (const m of pastProposals) known.set(m.id, m);
+  const when = (m) => fmtDate(m.lastProposed, { month: "short", day: "numeric" });
+  box.innerHTML = `<p class="results-heading">Proposed before, never picked<span class="muted small"> · or search for anything</span></p>`
+    + pastProposals.map((m) => resultHtml(m, `${esc(when(m))}${m.proposedBy ? ` · ${esc(m.proposedBy)}` : ""}${m.times > 1 ? ` · ${m.times}×` : ""}`)).join("");
+  renderDraft();
 }
 
 function renderDraft() {
@@ -406,18 +437,16 @@ function renderDraft() {
 async function runSearch() {
   const qv = $("#search-input").value.trim();
   const box = $("#search-results");
-  if (qv.length < 2) return;
+  if (qv.length < 2) return showHistory();
   const seq = ++searchSeq;
   box.innerHTML = `<p class="muted small">Searching…</p>`;
   try {
     const { results } = await api("GET", `/api/search?q=${encodeURIComponent(qv)}`);
     if (seq !== searchSeq) return;
-    box.innerHTML = results.length ? results.map((m) => `
-      <button type="button" class="result" data-action="draft-add" data-id="${m.id}">
-        ${posterHtml(m, { size: "w185" }).replace("<button", "<span").replace(/<\/button>$/, "</span>")}
-        <span class="poster-title">${esc(m.title)} <span class="yr">${esc(m.year ?? "")}</span></span>
-      </button>`).join("") : `<p class="muted small">No matches.</p>`;
-    box._results = new Map(results.map((m) => [m.id, m]));
+    for (const m of results) known.set(m.id, m);
+    box.innerHTML = results.length
+      ? results.map((m) => resultHtml(m, m.watched ? `<span class="badge picked">Watched ${esc(fmtDate(m.watched, { month: "short", day: "numeric" }))}</span>` : "")).join("")
+      : `<p class="muted small">No matches.</p>`;
     renderDraft();
   } catch (e) {
     if (seq === searchSeq) box.innerHTML = `<p class="muted small">${esc(e.message)}</p>`;
@@ -440,7 +469,7 @@ let rolesDate = null;
 function openRoles(date) {
   const n = state.upcoming.find((x) => x.date === date) ?? state.past.find((x) => x.date === date);
   rolesDate = date;
-  $("#roles-date").textContent = fmtDate(date, { weekday: "short", month: "short", day: "numeric" });
+  $("#roles-date").textContent = fmtDate(n.on, { weekday: "short", month: "short", day: "numeric" });
   const opts = (sel) => `<option value="">Follow rotation</option>` + state.participants.filter((p) => p.active)
     .map((p) => `<option value="${esc(p.email)}" ${sel === p.email ? "selected" : ""}>${esc(p.name)}</option>`).join("");
   const f = $("#roles-form");
@@ -451,6 +480,29 @@ function openRoles(date) {
 $("#roles-save").addEventListener("click", async () => {
   const f = $("#roles-form");
   if (await act(() => api("PUT", `/api/nights/${rolesDate}/roles`, { proposer: f.proposer.value || null, chooser: f.chooser.value || null }), "Roles updated")) rolesDlg.close();
+});
+
+// ---------- night date / time ----------
+
+const scheduleDlg = $("#schedule-dialog");
+let scheduleDate = null;
+function openSchedule(date) {
+  const n = state.upcoming.find((x) => x.date === date) ?? state.past.find((x) => x.date === date);
+  scheduleDate = date;
+  const f = $("#schedule-form");
+  f.on.value = n.on;
+  f.time.value = n.time;
+  $("#schedule-regular").textContent = `Regular schedule: ${fmtDate(n.date, { weekday: "long", month: "short", day: "numeric" })} at ${fmtTime(state.settings.nightTime)}.`;
+  $("#schedule-reset").hidden = !n.movedFrom && !n.customTime;
+  scheduleDlg.showModal();
+}
+$("#schedule-save").addEventListener("click", async () => {
+  const f = $("#schedule-form");
+  if (!f.on.value || !f.time.value) return toast("Pick a date and time", true);
+  if (await act(() => api("PUT", `/api/nights/${scheduleDate}/schedule`, { on: f.on.value, time: f.time.value }), "Night updated")) scheduleDlg.close();
+});
+$("#schedule-reset").addEventListener("click", async () => {
+  if (await act(() => api("PUT", `/api/nights/${scheduleDate}/schedule`, { on: null, time: null }), "Back on the regular schedule")) scheduleDlg.close();
 });
 
 // ---------- settings ----------
@@ -533,12 +585,13 @@ document.addEventListener("click", async (e) => {
   switch (action) {
     case "propose": return openPropose(date);
     case "roles": return openRoles(date);
+    case "schedule": return openSchedule(date);
     case "override": overriding.has(date) ? overriding.delete(date) : overriding.add(date); return render();
     case "settings": return openSettings();
     case "pick": hidePop(); return act(() => api("PUT", `/api/nights/${date}/selection`, { tmdbId: Number(id) }), "Picked!");
     case "unpick": return act(() => api("PUT", `/api/nights/${date}/selection`, { tmdbId: null }), "Pick cleared");
     case "draft-add": {
-      const m = $("#search-results")._results?.get(Number(id));
+      const m = known.get(Number(id));
       if (m && draft.length < 3 && !draft.some((d) => d.id === m.id)) { draft.push(m); renderDraft(); }
       if (t.closest("#movie-pop")) hidePop();
       return;
