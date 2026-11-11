@@ -1,6 +1,6 @@
 # Movie Night
 
-Weekly movie night planner. Participants rotate roles: the **proposer** picks 3 movies, and the **chooser** picks which one gets watched. The rotation is a fixed cycle of n×(n−1) weeks for n people, in which every proposer/chooser pairing happens exactly once. Each round of n weeks has everyone proposing once and choosing once, and nobody proposes or chooses two weeks in a row, including across cycles. With 4 or more people, the chooser also never proposes the following week. With A, B and C the cycle is A→B, B→C, C→A, A→C, C→B, B→A.
+Weekly movie night planner. Participants rotate roles: the **proposer** picks 3 movies, and the **chooser** picks which one gets watched. Movie nights recur on one or more days of the week, each with its own start time (Settings), and any single night can be moved or retimed. The rotation advances one step per night. It follows a fixed cycle of n×(n−1) nights for n people, in which every proposer/chooser pairing happens once. Each round of n nights has everyone proposing once and choosing once, and nobody gets the same role on consecutive nights. Nights with locked roles (proposals made, or set by an admin) keep them. The open nights between them are planned as a whole, so there are as few back-to-back repeats as possible, with ties going to the natural cycle order. A night that passes without proposals carries its turn over to the next night.
 
 Built with Bun, Hono and `bun:sqlite`, using TMDB for search, posters and movie details. There is no build step.
 
@@ -26,7 +26,7 @@ Admins manage participants (add by Google email, reorder the rotation, remove, m
 
 - Roles follow the rotation order unless an admin overrides them for a night. Roles are frozen once proposals are saved, so roster changes don't rewrite that night.
 - The proposer can set or change the 3 choices until a movie is picked. The chooser can pick, switch or undo until the night has passed. Admins can do all of this at any time.
-- Changing the night's weekday keeps the rotation: the next night under the new weekday has the same proposer and chooser as it would have had under the old one.
+- Changing the recurring nights keeps the rotation going: when nothing is locked, the next night keeps its proposer and chooser.
 
 ## Deploy to the media server
 
