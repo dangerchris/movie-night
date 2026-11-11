@@ -107,6 +107,14 @@ const MIGRATIONS: (string | ((db: Database) => void))[] = [
     // Dates before today are settled; the lineup starts filling from today.
     db.query("INSERT OR REPLACE INTO settings (key, value) VALUES ('lineup_through', ?)").run(addDays(today, -1));
   },
+  // Chat notifications: who to mention, and which reminders have gone out.
+  `
+  ALTER TABLE participants ADD COLUMN matrix_id TEXT;
+  CREATE TABLE notifications (
+    key     TEXT PRIMARY KEY,
+    sent_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+  `,
 ];
 
 export function openDb(path: string): Database {

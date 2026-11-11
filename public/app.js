@@ -614,12 +614,13 @@ function renderParticipants() {
   const inactive = state.participants.filter((p) => !p.active);
   const row = (p, i) => `<li class="${p.active ? "" : "inactive"}">
     <span class="pos">${p.active ? i + 1 : ""}</span>
-    <span class="who">${esc(p.name)}${p.isAdmin ? ` <span class="badge">admin</span>` : ""}<small>${esc(p.email)}</small></span>
+    <span class="who">${esc(p.name)}${p.isAdmin ? ` <span class="badge">admin</span>` : ""}<small>${esc(p.email)}${p.matrixId ? ` · ${esc(p.matrixId)}` : ""}</small></span>
     <span class="ctrl">
       ${p.active ? `
         <button class="btn small ghost" data-action="p-up" data-email="${esc(p.email)}" ${i === 0 ? "disabled" : ""} aria-label="Move up">↑</button>
         <button class="btn small ghost" data-action="p-down" data-email="${esc(p.email)}" ${i === active.length - 1 ? "disabled" : ""} aria-label="Move down">↓</button>
         <button class="btn small ghost" data-action="p-rename" data-email="${esc(p.email)}">Rename</button>
+        <button class="btn small ghost" data-action="p-matrix" data-email="${esc(p.email)}">Matrix ID</button>
         ${p.email !== state.me.email ? `<button class="btn small ghost" data-action="p-email" data-email="${esc(p.email)}">Change email</button>` : ""}
         <button class="btn small ghost" data-action="p-admin" data-email="${esc(p.email)}">${p.isAdmin ? "Revoke admin" : "Make admin"}</button>
         <button class="btn small ghost" data-action="p-remove" data-email="${esc(p.email)}">Remove</button>`
@@ -699,6 +700,12 @@ document.addEventListener("click", async (e) => {
       const p = state.participants.find((x) => x.email === email);
       const next = prompt(`New Google account email for ${p.name}. Their nights, proposals and picks move with them.`, p.email);
       if (next && next.trim() && next.trim().toLowerCase() !== p.email) await patchP(email, { email: next.trim() }, "Email updated");
+      return;
+    }
+    case "p-matrix": {
+      const p = state.participants.find((x) => x.email === email);
+      const id = prompt(`Matrix ID for ${p.name}, used to mention them in chat reminders (e.g. @alice:matrix.example.com). Leave empty for none.`, p.matrixId ?? "");
+      if (id !== null) await patchP(email, { matrixId: id.trim() }, "Matrix ID saved");
       return;
     }
     case "p-rename": {

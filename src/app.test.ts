@@ -17,10 +17,11 @@ const fakeMovies: MovieSource = {
 };
 
 // Tuesday 2026-11-10, noon UTC. Next Saturday is 2026-11-14.
-function setup(library: any = null) {
+function setup(library: any = null, notifier: any = null) {
   const clock = { now: new Date("2026-11-10T17:00:00Z") };
   const app = createApp({
     library,
+    notifier,
     db: openDb(":memory:"), movies: fakeMovies, adminEmails: [],
     auth: { accessTeamDomain: "", accessAud: "", picker: "localhost", publicUrl: "https://movies.example" },
     now: () => clock.now,
@@ -32,7 +33,7 @@ function setup(library: any = null) {
     const res = await app.request(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) }, peer(from));
     return { status: res.status, json: (await res.json()) as any };
   };
-  const setDay = (iso: string) => { clock.now = new Date(iso + "T17:00:00Z"); };
+  const setDay = (iso: string, utcTime = "17:00") => { clock.now = new Date(`${iso}T${utcTime}:00Z`); };
   return { app, call, peer, setDay };
 }
 
@@ -283,6 +284,54 @@ describe("api", () => {
     // A past night's date can be corrected.
     const r = await call("a@x.com", "PUT", "/api/nights/2026-11-14/schedule", { on: "2026-11-13" });
     expect(r.json.past[0].date).toBe("2026-11-13");
+  });
+
+  test("chat notifications: turns, picks and once-only reminders with mentions", async () => {
+    const sent: { text: string; html: string; mentions: string[] }[] = [];
+    const notifier = { async send(text: string, html: string, mentions: string[]) { sent.push({ text, html, mentions }); } };
+    const { app, call, setDay } = setup(null, notifier);
+    await three(call);
+    await call("a@x.com", "PATCH", "/api/participants/b%40x.com", { matrixId: "@bee:chat" });
+    expect((await call("a@x.com", "PATCH", "/api/participants/c%40x.com", { matrixId: "nope" })).status).toBe(400);
+    const flush = () => new Promise((r) => setTimeout(r, 0));
+    let st = (await call("a@x.com", "GET", "/api/state")).json;
+    const n1 = st.upcoming[0]; // Sat Nov 14, A proposes, B chooses
+    expect([n1.proposer.name, n1.chooser.name]).toEqual(["A", "B"]);
+
+    // Two days before at 10:00 Toronto (15:00 UTC): proposer reminder, once.
+    setDay("2026-11-12", "14:00");
+    await app.runReminders();
+    expect(sent).toHaveLength(0);
+    setDay("2026-11-12", "15:05");
+    await app.runReminders();
+    await app.runReminders();
+    expect(sent).toHaveLength(1);
+    expect(sent[0].text).toContain("A, you're proposing for movie night on Sat, Nov 14 at 7:30 PM");
+    expect(sent[0].mentions).toEqual(["@bee:chat"]); // B (the chooser) has a Matrix ID; A doesn't
+    expect(sent[0].html).toContain('<a href="https://matrix.to/#/@bee:chat">B</a>');
+
+    // Proposals: the chooser is told it's their turn.
+    await call("a@x.com", "PUT", "/api/nights/2026-11-14/proposals", { tmdbIds: [1, 2, 3] });
+    await flush();
+    expect(sent[1].text).toContain("B, your turn to pick for Sat, Nov 14 at 7:30 PM: Movie 1, Movie 2 or Movie 3. Proposed by A.");
+    expect(sent[1].mentions).toEqual(["@bee:chat"]);
+    // Day of, nothing picked yet: chooser reminder.
+    setDay("2026-11-14", "15:10");
+    await app.runReminders();
+    expect(sent[2].text).toContain("B, movie night is tonight at 7:30 PM. Time to pick: Movie 1, Movie 2 or Movie 3.");
+    // Pick, then the noon "tonight" note, once.
+    await call("b@x.com", "PUT", "/api/nights/2026-11-14/selection", { tmdbId: 2 });
+    await flush();
+    expect(sent[3].text).toContain("B picked Movie 2 for Sat, Nov 14 at 7:30 PM.");
+    setDay("2026-11-14", "17:05");
+    await app.runReminders();
+    await app.runReminders();
+    expect(sent[4].text).toContain("Tonight at 7:30 PM: Movie 2, picked by B.");
+    expect(sent).toHaveLength(5);
+    // After the night starts, nothing more for it.
+    setDay("2026-11-15", "01:00"); // 8pm Toronto
+    await app.runReminders();
+    expect(sent).toHaveLength(5);
   });
 
   test("runs of open nights between locked nights are planned without repeats when possible", async () => {

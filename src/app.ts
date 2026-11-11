@@ -5,6 +5,7 @@ import { identify, PICKER_COOKIE, type AuthConfig, type Identity } from "./auth.
 import { addDays, daysBetween, isIsoDate, isValidTimezone, rotationCycle, todayInTz, weekdayOf } from "./schedule.ts";
 import { TmdbError, type MovieDetails, type MovieSource } from "./tmdb.ts";
 import type { Library } from "./jellyfin.ts";
+import type { Notifier } from "./matrix.ts";
 
 export const PROPOSAL_COUNT = 3;
 const MOVIE_CACHE_MS = 7 * 86_400_000;
@@ -19,6 +20,7 @@ export interface AppDeps {
   movies: MovieSource;
   adminEmails: string[];
   library?: Library | null;
+  notifier?: Notifier | null;
   now?: () => Date;
 }
 
@@ -28,6 +30,7 @@ interface Participant {
   position: number;
   active: number;
   is_admin: number;
+  matrix_id: string | null;
 }
 
 /**
@@ -89,7 +92,7 @@ export function tidyProviders(names: string[]): string[] {
   return [...set].filter((n) => !(n.endsWith(" (via Prime)") && set.has(n.slice(0, -" (via Prime)".length))));
 }
 
-export function createApp({ db, auth, movies, adminEmails, library = null, now = () => new Date() }: AppDeps) {
+export function createApp({ db, auth, movies, adminEmails, library = null, notifier = null, now = () => new Date() }: AppDeps) {
   const admins = new Set(adminEmails.map((e) => e.trim().toLowerCase()).filter(Boolean));
 
   // ---------- data access ----------
@@ -371,6 +374,92 @@ export function createApp({ db, auth, movies, adminEmails, library = null, now =
     return m;
   }
 
+  // ---------- chat notifications ----------
+
+  /** A message: plain text, a person (mentioned if they have a Matrix ID), or a movie title. */
+  type Part = string | { person: string | null } | { movie: number };
+  const escHtml = (x: string) => x.replace(/[&<>"]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[ch]!);
+  const dayLabel = (date: string) =>
+    new Date(date + "T12:00:00Z").toLocaleDateString("en-US", { timeZone: "UTC", weekday: "short", month: "short", day: "numeric" });
+  const timeLabel = (hhmm: string) => {
+    const [h, m] = hhmm.split(":").map(Number);
+    return `${((h + 11) % 12) + 1}:${String(m).padStart(2, "0")} ${h < 12 ? "AM" : "PM"}`;
+  };
+  const movieTitle = (id: number) => (cachedMovie(id) as { title: string }).title;
+  const titleList = (ids: number[]) => ids.flatMap((id, i): Part[] =>
+    [i === 0 ? "" : i === ids.length - 1 ? " or " : ", ", { movie: id }]);
+
+  function compose(parts: Part[]) {
+    let text = "", html = "";
+    const mentions: string[] = [];
+    for (const p of parts) {
+      if (typeof p === "string") { text += p; html += escHtml(p); }
+      else if ("movie" in p) { const t = movieTitle(p.movie); text += t; html += `<b>${escHtml(t)}</b>`; }
+      else {
+        const who = p.person ? q.participant.get(p.person) : null;
+        const name = who?.name ?? p.person ?? "someone";
+        text += name;
+        if (who?.matrix_id) {
+          html += `<a href="https://matrix.to/#/${escHtml(who.matrix_id)}">${escHtml(name)}</a>`;
+          mentions.push(who.matrix_id);
+        } else html += escHtml(name);
+      }
+    }
+    if (auth.publicUrl) { text += `\n${auth.publicUrl}`; html += `<br><a href="${escHtml(auth.publicUrl)}">Open movie night</a>`; }
+    return { text, html, mentions };
+  }
+
+  async function post(parts: Part[]) {
+    if (!notifier) return;
+    const m = compose(parts);
+    await notifier.send(m.text, m.html, m.mentions);
+  }
+  /** Fire-and-forget for messages triggered by someone's action. */
+  const announce = (parts: Part[]) => { post(parts).catch((e) => console.error("notify:", e)); };
+
+  /** Hour:minute now in the configured timezone. */
+  const clockIn = (tz: string) => new Intl.DateTimeFormat("en-GB", { timeZone: tz, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(now());
+
+  /**
+   * Scheduled reminders, each sent once: the proposer two days before (10:00) and on the day (10:00)
+   * if there are no choices yet; the chooser on the day (10:00) if nothing is picked; and a "tonight"
+   * note at noon once a movie is picked. Nothing is sent once the night has started.
+   */
+  async function runReminders() {
+    if (!notifier) return;
+    const s = getSettings();
+    const t = today(s);
+    const clock = clockIn(s.timezone);
+    const once = async (key: string, parts: Part[]) => {
+      if (db.query("SELECT 1 FROM notifications WHERE key = ?").get(key)) return;
+      await post(parts);
+      db.query("INSERT OR IGNORE INTO notifications (key) VALUES (?)").run(key);
+    };
+    for (const n of upcoming(s, addDays(t, 2))) {
+      if (n.date > addDays(t, 2)) break;
+      if (n.date === t && clock >= n.time) continue;
+      const ids = n.entry ? q.proposals.all(n.entry.id).map((p) => p.tmdb_id) : [];
+      const picked = n.entry?.selected_tmdb_id ?? null;
+      const when = `${dayLabel(n.date)} at ${timeLabel(n.time)}`;
+      const due = (daysAhead: number, at: string) => n.date === addDays(t, daysAhead) && clock >= at;
+      if (ids.length < PROPOSAL_COUNT) {
+        if (due(2, "10:00"))
+          await once(`propose-2d:${n.date}:${n.roles.proposer}`, [{ person: n.roles.proposer },
+            `, you're proposing for movie night on ${when}. Pick 3 movies for `, { person: n.roles.chooser }, " to choose from."]);
+        if (due(0, "10:00"))
+          await once(`propose-day:${n.date}:${n.roles.proposer}`, [{ person: n.roles.proposer },
+            `, movie night is tonight at ${timeLabel(n.time)} and still needs 3 movies for `, { person: n.roles.chooser }, " to choose from."]);
+      } else if (!picked) {
+        if (due(0, "10:00"))
+          await once(`choose-day:${n.date}:${n.roles.chooser}`, [{ person: n.roles.chooser },
+            `, movie night is tonight at ${timeLabel(n.time)}. Time to pick: `, ...titleList(ids), "."]);
+      } else if (due(0, "12:00")) {
+        await once(`tonight:${n.date}:${picked}`, [`Tonight at ${timeLabel(n.time)}: `, { movie: picked },
+          ", picked by ", { person: n.entry?.selected_by ?? n.roles.chooser }, "."]);
+      }
+    }
+  }
+
   // ---------- views ----------
 
   function personView(email: string | null, names: Map<string, string>) {
@@ -443,7 +532,7 @@ export function createApp({ db, auth, movies, adminEmails, library = null, now =
   }
 
   function participantView(p: Participant) {
-    return { email: p.email, name: p.name, position: p.position, active: !!p.active, isAdmin: !!p.is_admin };
+    return { email: p.email, name: p.name, position: p.position, active: !!p.active, isAdmin: !!p.is_admin, matrixId: p.matrix_id };
   }
 
   function addParticipant(email: string, name: string, isAdmin: boolean): Participant {
@@ -686,6 +775,7 @@ export function createApp({ db, auth, movies, adminEmails, library = null, now =
       throw new HttpError(400, "bad_proposals", `Pick ${PROPOSAL_COUNT} different movies`);
     await Promise.all(ids.map((id) => getMovie(id))); // validates ids and warms the cache
 
+    const changed = !!current && q.proposals.all(current.id).length === PROPOSAL_COUNT;
     db.transaction(() => {
       const entry = r.kind === "upcoming" ? claim(s, r.night.index) : r.entry;
       // The night keeps these roles from now on.
@@ -697,6 +787,12 @@ export function createApp({ db, auth, movies, adminEmails, library = null, now =
       if (entry.selected_tmdb_id && !ids.includes(entry.selected_tmdb_id))
         db.query("UPDATE lineup SET selected_tmdb_id = NULL, selected_by = NULL, selected_at = NULL WHERE id = ?").run(entry.id);
     })();
+    if (r.kind === "upcoming" && roles.chooser) {
+      const when = `${dayLabel(r.night.date)} at ${timeLabel(r.night.time)}`;
+      announce(changed
+        ? [{ person: me.email }, ` changed the choices for ${when}: `, ...titleList(ids), ". ", { person: roles.chooser }, ", over to you."]
+        : [{ person: roles.chooser }, `, your turn to pick for ${when}: `, ...titleList(ids), ". Proposed by ", { person: roles.proposer }, "."]);
+    }
     return c.json(stateView(me));
   });
 
@@ -720,6 +816,8 @@ export function createApp({ db, auth, movies, adminEmails, library = null, now =
       if (!proposed.includes(id)) throw new HttpError(400, "not_proposed", "That movie wasn't one of the choices");
       db.query("UPDATE lineup SET selected_tmdb_id = ?, selected_by = ?, selected_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
         .run(id, me.email, entry.id);
+      if (r.kind === "upcoming")
+        announce([{ person: me.email }, " picked ", { movie: id }, ` for ${dayLabel(r.night.date)} at ${timeLabel(r.night.time)}.`]);
     }
     return c.json(stateView(me));
   });
@@ -872,6 +970,11 @@ export function createApp({ db, auth, movies, adminEmails, library = null, now =
         return c.json(stateView(me));
       }
     }
+    if ("matrixId" in b) {
+      const id = String(b.matrixId ?? "").trim();
+      if (id && !/^@[^:\s]+:\S+$/.test(id)) throw new HttpError(400, "bad_matrix_id", "Matrix IDs look like @name:server");
+      db.query("UPDATE participants SET matrix_id = ? WHERE email = ?").run(id || null, email);
+    }
     if ("name" in b) {
       const name = String(b.name ?? "").trim();
       if (!name || name.length > 40) throw new HttpError(400, "bad_name", "Name must be 1 to 40 characters");
@@ -933,5 +1036,5 @@ export function createApp({ db, auth, movies, adminEmails, library = null, now =
 
   app.all("/api/*", (c) => c.json({ error: "not_found" }, 404));
 
-  return app;
+  return Object.assign(app, { runReminders });
 }

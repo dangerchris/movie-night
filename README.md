@@ -29,6 +29,16 @@ Admins manage participants (add by Google email, reorder the rotation, remove, m
 - **Proposing and picking.** The proposer sets or changes the 3 choices until a movie is picked. The chooser picks, switches or undoes until the night has passed. Admins can do either at any time with **Admin override**, and can set a night's roles.
 - **Changing dates (admins).** **Change date** moves a night with its roles, choices and pick, and the nights after it close up behind it. **Back to regular schedule** undoes a move or a custom time. **Skip this date** cancels a date and moves the nights after it up; skipped dates appear in the list with **Restore**. A past night's date can be corrected the same way.
 
+## Chat notifications (Matrix)
+
+With `MATRIX_HOMESERVER`, `MATRIX_ACCESS_TOKEN` and `MATRIX_ROOM` set, the app posts to a Matrix room as a bot account. People are mentioned (and pinged) when their participant entry has a Matrix ID, which you set from Settings → Participants → Matrix ID.
+
+- When proposals are saved: the chooser is told it's their turn, with the three choices. Changed choices are announced too.
+- When a movie is picked: the pick is announced.
+- Reminders, checked every 5 minutes and each sent once: the proposer two days before at 10:00 and on the day at 10:00 if there are no choices yet, the chooser on the day at 10:00 if nothing is picked, and "Tonight: ..." at noon once a movie is picked. Nothing is sent after a night has started.
+
+The bot is `@movienight:matrix.example.com` and posts in the private "Movie Night" room (`#movienight`).
+
 ## Deploy to the media server
 
 ```sh

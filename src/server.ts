@@ -4,6 +4,7 @@ import { parsePickerMode } from "./auth.ts";
 import { openDb } from "./db.ts";
 import { tmdbSource } from "./tmdb.ts";
 import { jellyfinLibrary } from "./jellyfin.ts";
+import { matrixNotifier } from "./matrix.ts";
 
 const env = process.env;
 const app = createApp({
@@ -11,6 +12,7 @@ const app = createApp({
   movies: tmdbSource(env.TMDB_TOKEN ?? ""),
   adminEmails: (env.ADMIN_EMAILS ?? "").split(","),
   library: jellyfinLibrary(env.JELLYFIN_URL ?? "", env.JELLYFIN_API_KEY ?? ""),
+  notifier: matrixNotifier(env.MATRIX_HOMESERVER ?? "", env.MATRIX_ACCESS_TOKEN ?? "", env.MATRIX_ROOM ?? ""),
   auth: {
     accessTeamDomain: env.ACCESS_TEAM_DOMAIN ?? "",
     accessAud: env.ACCESS_AUD ?? "",
@@ -39,6 +41,11 @@ app.use("/*", async (c, next) => {
   if (c.res.ok) c.res.headers.set("Cache-Control", c.req.query("v") ? "public, max-age=31536000, immutable" : "no-cache");
 });
 app.use("/*", serveStatic({ root: "./public" }));
+
+// Reminders: check every 5 minutes (each reminder is only ever sent once).
+const remind = () => app.runReminders().catch((e) => console.error("reminders:", e));
+setTimeout(remind, 15_000);
+setInterval(remind, 5 * 60_000);
 
 const port = Number(env.PORT ?? 8795);
 console.log(`movie-night listening on http://0.0.0.0:${port}` + (env.TMDB_TOKEN ? "" : " (TMDB_TOKEN not set: search disabled)"));
