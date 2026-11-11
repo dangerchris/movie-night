@@ -24,9 +24,10 @@ Admins manage participants (add by Google email, reorder the rotation, remove, m
 
 ## Rules
 
-- Roles follow the rotation order unless an admin overrides them for a night. Roles are frozen once proposals are saved, so roster changes don't rewrite that night.
-- The proposer can set or change the 3 choices until a movie is picked. The chooser can pick, switch or undo until the night has passed. Admins can do all of this at any time.
-- Changing the recurring nights keeps the rotation going: when nothing is locked, the next night keeps its proposer and chooser.
+- **Calendar and lineup.** The calendar is the weekly schedule (Settings) plus one-off changes: a skipped date, an extra date or a custom start time. The lineup is the ordered queue of nights that have roles, proposals or a pick. Lineup nights fill the calendar's upcoming dates in order, so adding or removing weekdays, skipping a date or moving a night never leaves a gap; the nights just slide onto the next dates. When a date passes, the night on it is recorded as held then.
+- **Roles.** Nights after the lineup are planned from the rotation: everyone proposes and chooses once per round, nobody gets the same role on consecutive nights, and pairings vary. Proposing for a later open night adds the open nights before it to the lineup with the roles they were showing, so nothing shifts. A night that passes with nothing proposed carries its turn over to the next night.
+- **Proposing and picking.** The proposer sets or changes the 3 choices until a movie is picked. The chooser picks, switches or undoes until the night has passed. Admins can do either at any time with **Admin override**, and can set a night's roles.
+- **Changing dates (admins).** **Change date** moves a night with its roles, choices and pick, and the nights after it close up behind it. **Back to regular schedule** undoes a move or a custom time. **Skip this date** cancels a date and moves the nights after it up; skipped dates appear in the list with **Restore**. A past night's date can be corrected the same way.
 
 ## Deploy to the media server
 
