@@ -522,7 +522,7 @@ function openSchedule(date) {
   const f = $("#schedule-form");
   f.on.value = n.on;
   f.time.value = n.time;
-  $("#schedule-regular").textContent = `Regular schedule: ${fmtDate(n.date, { weekday: "long", month: "short", day: "numeric" })} at ${fmtTime(state.settings.nightTime)}.`;
+  $("#schedule-regular").textContent = `Regular schedule: ${fmtDate(n.date, { weekday: "long", month: "short", day: "numeric" })} at ${fmtTime(n.regularTime)}.`;
   $("#schedule-reset").hidden = !n.movedFrom && !n.customTime;
   scheduleDlg.showModal();
 }
@@ -543,8 +543,7 @@ function openSettings() {
   const f = $("#settings-form");
   const s = state.settings;
   f.title.value = s.title;
-  f.nightWeekday.value = String(s.nightWeekday);
-  f.nightTime.value = s.nightTime;
+  renderDays(s.schedule);
   f.timezone.value = s.timezone;
   f.region.value = s.region;
   if (!$("#tz-list").children.length && Intl.supportedValuesOf)
@@ -552,6 +551,31 @@ function openSettings() {
   renderParticipants();
   settingsDlg.showModal();
 }
+
+// Weekly nights: one row per weekday (Monday first), with a start time when switched on.
+const DAY_ORDER = [1, 2, 3, 4, 5, 6, 0];
+function renderDays(schedule) {
+  const byDay = new Map(schedule.map((d) => [d.weekday, d.time]));
+  const fallback = schedule[0]?.time ?? "19:30";
+  $("#day-list").innerHTML = DAY_ORDER.map((w) => {
+    const on = byDay.has(w);
+    return `<label class="day-row ${on ? "on" : ""}">
+      <input type="checkbox" data-day="${w}" ${on ? "checked" : ""}>
+      <span class="day-name">${DAYS[w]}</span>
+      <input type="time" data-day-time="${w}" value="${esc(byDay.get(w) ?? fallback)}" ${on ? "" : "disabled"}>
+    </label>`;
+  }).join("");
+}
+function readDays() {
+  return DAY_ORDER.filter((w) => $(`[data-day="${w}"]`).checked).map((w) => ({ weekday: w, time: $(`[data-day-time="${w}"]`).value }));
+}
+document.addEventListener("change", (e) => {
+  const w = e.target.dataset?.day;
+  if (w === undefined) return;
+  const time = $(`[data-day-time="${w}"]`);
+  time.disabled = !e.target.checked;
+  e.target.closest(".day-row").classList.toggle("on", e.target.checked);
+});
 
 function renderParticipants() {
   const active = state.participants.filter((p) => p.active);
@@ -576,7 +600,7 @@ $("#settings-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const f = e.target;
   await act(() => api("PUT", "/api/settings", {
-    title: f.title.value, nightWeekday: Number(f.nightWeekday.value), nightTime: f.nightTime.value,
+    title: f.title.value, schedule: readDays(),
     timezone: f.timezone.value, region: f.region.value,
   }), "Settings saved");
 });

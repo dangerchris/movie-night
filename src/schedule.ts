@@ -36,19 +36,41 @@ export function nextWeekday(iso: string, weekday: number): string {
   return addDays(iso, (weekday - weekdayOf(iso) + 7) % 7);
 }
 
-export function upcomingNightDates(today: string, weekday: number, count: number): string[] {
-  const first = nextWeekday(today, weekday);
-  return Array.from({ length: count }, (_, i) => addDays(first, i * 7));
+/** Night dates (days whose weekday is in `weekdays`) from `today` for `days` days, at least `min` of them. */
+export function upcomingNightDates(today: string, weekdays: number[], days: number, min: number): string[] {
+  const set = new Set(weekdays);
+  if (set.size === 0) return [];
+  const out: string[] = [];
+  for (let i = 0; i < days || out.length < min; i++) {
+    const d = addDays(today, i);
+    if (set.has(weekdayOf(d))) out.push(d);
+  }
+  return out;
+}
+
+/**
+ * Signed count of night dates between `from` and `to`: the number in [from, to) when to >= from,
+ * otherwise minus the number in [to, from). With `from` a night date, that night counts as 0.
+ */
+export function nightsBetween(from: string, to: string, weekdays: number[]): number {
+  const set = new Set(weekdays);
+  if (set.size === 0) return 0;
+  const sign = to >= from ? 1 : -1;
+  const [a, b] = sign > 0 ? [from, to] : [to, from];
+  const span = daysBetween(a, b);
+  let count = Math.floor(span / 7) * set.size;
+  for (let i = span - (span % 7); i < span; i++) if (set.has(weekdayOf(addDays(a, i)))) count++;
+  return sign * count;
 }
 
 type Pair = [proposer: number, chooser: number];
 const cycleCache = new Map<number, Pair[]>();
 
 /**
- * The rotation for n people: a cycle of n*(n-1) weeks containing every proposer/chooser pairing
- * exactly once, split into rounds of n weeks in which everyone proposes once and chooses once.
- * Consecutive weeks (including the wrap-around) never repeat the proposer or the chooser, and when
- * possible (n >= 4) this week's chooser doesn't propose next week either.
+ * The rotation for n people: a cycle of n*(n-1) nights containing every proposer/chooser pairing
+ * exactly once, split into rounds of n nights in which everyone proposes once and chooses once.
+ * Consecutive nights (including the wrap-around) never repeat the proposer or the chooser, and when
+ * possible (n >= 4) a night's chooser doesn't propose the next night either.
  */
 export function rotationCycle(n: number): Pair[] {
   const cached = cycleCache.get(n);
@@ -92,13 +114,11 @@ function fallbackCycle(n: number): Pair[] {
   return out;
 }
 
-export function rotationRoles(
-  date: string, anchor: string, order: string[],
-): { proposer: string | null; chooser: string | null } {
+/** Roles for the night at rotation position `k` (any integer; the cycle repeats). */
+export function rotationRoles(k: number, order: string[]): { proposer: string | null; chooser: string | null } {
   const n = order.length;
   if (n === 0) return { proposer: null, chooser: null };
   const cycle = rotationCycle(n);
-  const k = Math.floor(daysBetween(anchor, date) / 7);
   const [p, c] = cycle[((k % cycle.length) + cycle.length) % cycle.length];
   return { proposer: order[p], chooser: order[c] };
 }

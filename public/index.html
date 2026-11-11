@@ -79,14 +79,10 @@
       </header>
       <form id="settings-form" class="settings-grid">
         <label class="field">Name <input name="title" maxlength="60" required></label>
-        <label class="field">Night
-          <select name="nightWeekday">
-            <option value="0">Sunday</option><option value="1">Monday</option><option value="2">Tuesday</option>
-            <option value="3">Wednesday</option><option value="4">Thursday</option><option value="5">Friday</option>
-            <option value="6">Saturday</option>
-          </select>
-        </label>
-        <label class="field">Start time <input name="nightTime" type="time" required></label>
+        <fieldset class="field nights-field">
+          <legend>Movie nights (every week)</legend>
+          <div class="day-list" id="day-list"></div>
+        </fieldset>
         <label class="field">Timezone <input name="timezone" list="tz-list" required></label>
         <label class="field">Rating region <input name="region" maxlength="2" pattern="[A-Za-z]{2}" title="Two-letter country code, e.g. CA or US"></label>
         <div class="field"><button class="btn primary" type="submit">Save settings</button></div>

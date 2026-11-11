@@ -3,14 +3,15 @@ import { Hono, type Context } from "hono";
 import { setCookie, deleteCookie } from "hono/cookie";
 import { identify, PICKER_COOKIE, type AuthConfig, type Identity } from "./auth.ts";
 import {
-  isIsoDate, isValidTimezone, nextWeekday, rotationRoles, todayInTz, upcomingNightDates, weekdayOf,
+  addDays, daysBetween, isIsoDate, isValidTimezone, nightsBetween, rotationCycle, rotationRoles, todayInTz, upcomingNightDates, weekdayOf,
 } from "./schedule.ts";
 import { TmdbError, type MovieDetails, type MovieSource } from "./tmdb.ts";
 import type { Library } from "./jellyfin.ts";
 
 export const PROPOSAL_COUNT = 3;
 const MOVIE_CACHE_MS = 7 * 86_400_000;
-const UPCOMING_COUNT = 6;
+const UPCOMING_DAYS = 28;  // show the nights in the next four weeks...
+const UPCOMING_MIN = 4;    // ...but at least this many
 const PAST_COUNT = 12;
 
 export interface AppDeps {
@@ -46,16 +47,18 @@ const onDate = (slot: string, row: NightRow | null) => row?.actual_date ?? slot;
 
 interface Settings {
   title: string;
-  nightWeekday: number;
-  nightTime: string; // HH:MM
+  schedule: NightDay[];   // recurring nights, sorted by weekday
   timezone: string;
   region: string;
-  rotationAnchor: string;
+  rotationAnchor: string; // a night date...
+  rotationBase: number;   // ...and its position in the rotation cycle
 }
+
+interface NightDay { weekday: number; time: string } // 0 = Sunday; HH:MM
 
 const DEFAULTS: Record<string, string> = {
   title: "Movie Night",
-  night_weekday: "6",
+  night_weekday: "6", // legacy single-night settings, used until a schedule is saved
   night_time: "19:30",
   timezone: "America/Toronto",
   region: "CA",
@@ -90,6 +93,9 @@ export function createApp({ db, auth, movies, adminEmails, library = null, now =
       `SELECT n.* FROM nights n WHERE COALESCE(n.actual_date, n.date) < ?
          AND (n.selected_tmdb_id IS NOT NULL OR EXISTS (SELECT 1 FROM proposals p WHERE p.night_date = n.date))
        ORDER BY COALESCE(n.actual_date, n.date) DESC LIMIT ?`),
+    lastRolesBefore: db.query<NightRow, [string]>(
+      `SELECT * FROM nights WHERE COALESCE(actual_date, date) < ? AND proposer_email IS NOT NULL AND chooser_email IS NOT NULL
+       ORDER BY COALESCE(actual_date, date) DESC, date DESC LIMIT 1`),
     nightOn: db.query<{ date: string }, [string, string]>(
       "SELECT date FROM nights WHERE COALESCE(actual_date, date) = ? AND date != ?"),
     // Movies passed over on settled nights (a pick was made, or the night is past) and never picked
@@ -116,14 +122,16 @@ export function createApp({ db, auth, movies, adminEmails, library = null, now =
   function getSettings(): Settings {
     const raw: Record<string, string> = { ...DEFAULTS };
     for (const r of q.settingRows.all()) raw[r.key] = r.value;
-    const weekday = Number(raw.night_weekday);
+    const schedule: NightDay[] = raw.schedule
+      ? JSON.parse(raw.schedule)
+      : [{ weekday: Number(raw.night_weekday), time: raw.night_time }];
     if (!raw.rotation_anchor) {
-      raw.rotation_anchor = nextWeekday(todayInTz(raw.timezone, now()), weekday);
+      raw.rotation_anchor = upcomingNightDates(todayInTz(raw.timezone, now()), schedule.map((d) => d.weekday), 0, 1)[0];
       q.putSetting.run("rotation_anchor", raw.rotation_anchor);
     }
     return {
-      title: raw.title, nightWeekday: weekday, nightTime: raw.night_time, timezone: raw.timezone,
-      region: raw.region, rotationAnchor: raw.rotation_anchor,
+      title: raw.title, schedule, timezone: raw.timezone, region: raw.region,
+      rotationAnchor: raw.rotation_anchor, rotationBase: Number(raw.rotation_base ?? 0),
     };
   }
 
@@ -146,20 +154,144 @@ export function createApp({ db, auth, movies, adminEmails, library = null, now =
     return c ? JSON.parse(c.data) : { id, title: `TMDB #${id}` };
   }
 
-  /**
-   * Effective roles: stored (locked or overridden) roles, else the rotation. On upcoming nights a
-   * stored role whose person has since been removed falls back to the rotation.
-   */
-  function rolesFor(date: string, s: Settings, row: NightRow | null) {
-    const order = q.activeOrder.all().map((p) => p.email);
-    const rot = rotationRoles(date, s.rotationAnchor, order);
-    const upcoming = onDate(date, row) >= todayInTz(s.timezone, now());
-    const keep = (e: string | null | undefined) => (e && (!upcoming || order.includes(e)) ? e : null);
-    return { proposer: keep(row?.proposer_email) ?? rot.proposer, chooser: keep(row?.chooser_email) ?? rot.chooser };
-  }
+  const weekdays = (s: Settings) => s.schedule.map((d) => d.weekday);
+  const regularTime = (slot: string, s: Settings) =>
+    s.schedule.find((d) => d.weekday === weekdayOf(slot))?.time ?? s.schedule[0]?.time ?? "19:30";
+  /** Position of a night in the rotation: every recurring night advances it by one. */
+  const rotationIndex = (slot: string, s: Settings) => s.rotationBase + nightsBetween(s.rotationAnchor, slot, weekdays(s));
+
+  /** A regular date with no night of its own that another (moved) night already occupies. */
+  const taken = (slot: string) => !q.night.get(slot) && !!q.nightOn.get(slot, slot);
 
   function isNightDate(date: string, s: Settings): boolean {
-    return weekdayOf(date) === s.nightWeekday || q.night.get(date) !== null;
+    return weekdays(s).includes(weekdayOf(date)) || q.night.get(date) !== null;
+  }
+
+  type Roles = { proposer: string | null; chooser: string | null };
+
+  /** Stored roles for a night; on upcoming nights, people who have since been removed don't count. */
+  function storedRoles(row: NightRow | null, order: string[], upcoming: boolean): Roles {
+    const keep = (e: string | null | undefined) => (e && (!upcoming || order.includes(e)) ? e : null);
+    return { proposer: keep(row?.proposer_email), chooser: keep(row?.chooser_email) };
+  }
+
+  /**
+   * Plans roles for every night from today through `through`. Nights with stored roles (locked when
+   * proposals were made, or set by an admin) keep them. Open nights are filled in date order with the
+   * next pairing in the rotation cycle that doesn't repeat the proposer or chooser of the night before
+   * or of the next night when that one is fixed (and, with 4+ people, doesn't make the previous chooser
+   * propose next). With nothing fixed this is exactly the rotation cycle. It continues from the most
+   * recent night that had roles stored, so a night that passes without proposals carries its turn over.
+   */
+  function plan(s: Settings, through: string): Map<string, Roles> {
+    const today = todayInTz(s.timezone, now());
+    const order = q.activeOrder.all().map((p) => p.email);
+    const out = new Map<string, Roles>();
+    const slots = new Set(
+      upcomingNightDates(today, weekdays(s), Math.max(0, daysBetween(today, through) + 1), 0).filter((d) => !taken(d)));
+    for (const r of q.nightsFrom.all(today)) if (onDate(r.date, r) <= through) slots.add(r.date);
+    const nights = [...slots].map((slot) => ({ slot, row: q.night.get(slot) }))
+      .sort((x, y) => onDate(x.slot, x.row).localeCompare(onDate(y.slot, y.row)) || x.slot.localeCompare(y.slot));
+    if (order.length === 0) { for (const x of nights) out.set(x.slot, { proposer: null, chooser: null }); return out; }
+
+    const n = order.length;
+    const cycle: Roles[] = rotationCycle(n).map(([p, c]) => ({ proposer: order[p], chooser: order[c] }));
+    const key = (r: Roles) => `${r.proposer}>${r.chooser}`;
+    const indexOf = new Map(cycle.map((r, i) => [key(r), i]));
+    const fixed = nights.map((x) => storedRoles(x.row, order, true));
+
+    const last = q.lastRolesBefore.get(today);
+    let prev: Roles | null = last ? { proposer: last.proposer_email, chooser: last.chooser_email } : null;
+    let ptr = prev && indexOf.has(key(prev)) ? indexOf.get(key(prev))!
+      : nights.length ? rotationIndex(nights[0].slot, s) - 1 : 0;
+
+    // Cost of putting `b` right after `a`: a repeated proposer or chooser on consecutive nights, and
+    // (with 4+ people) the previous chooser proposing next.
+    const cost = (a: Roles | null, b: Roles | null) => !a || !b ? 0
+      : +(a.proposer === b.proposer) * 2 + +(a.chooser === b.chooser) * 2 + (n >= 4 && a.chooser === b.proposer ? 1 : 0);
+    const isFull = (f: Roles) => !!(f.proposer && f.chooser);
+    const candidates = (from: number, f: Roles) =>
+      Array.from({ length: cycle.length }, (_, j) => cycle[(((from + 1 + j) % cycle.length) + cycle.length) % cycle.length])
+        .filter((c) => (!f.proposer || c.proposer === f.proposer) && (!f.chooser || c.chooser === f.chooser));
+
+    let i = 0;
+    while (i < nights.length) {
+      if (isFull(fixed[i])) {
+        prev = fixed[i];
+        out.set(nights[i].slot, prev);
+        if (indexOf.has(key(prev))) ptr = indexOf.get(key(prev))!;
+        i++;
+        continue;
+      }
+      // A run of open nights [i, j), followed by a fixed night (or the end of the plan).
+      let j = i;
+      while (j < nights.length && !isFull(fixed[j])) j++;
+      const next = j < nights.length ? fixed[j] : null;
+      // Plan a run at once: fewest repeats, ties going to the natural cycle order (searched first).
+      const solve = (run: Roles[], after: Roles | null): Roles[] => {
+        let best: { score: number; picks: Roles[] } = { score: Infinity, picks: [] };
+        let budget = 20_000;
+        const dfs = (t: number, before: Roles | null, from: number, score: number, picks: Roles[]) => {
+          if (score >= best.score || --budget < 0) return;
+          if (t === run.length) {
+            const total = score + cost(before, after);
+            if (total < best.score) best = { score: total, picks: [...picks] };
+            return;
+          }
+          const f = run[t];
+          const cands = candidates(from, f);
+          if (!cands.length) cands.push({ proposer: f.proposer ?? cycle[0].proposer, chooser: f.chooser ?? cycle[0].chooser });
+          for (const c of cands) {
+            picks.push(c);
+            dfs(t + 1, c, indexOf.get(key(c)) ?? from + 1, score + cost(before, c), picks);
+            picks.pop();
+          }
+        };
+        dfs(0, prev, ptr, 0, []);
+        return best.picks;
+      };
+      // A run leading up to a fixed night is planned as a whole; open nights at the end of the plan
+      // only need to fit the night before, so they're filled one at a time.
+      const runs = next ? [[i, j]] : Array.from({ length: j - i }, (_, k) => [i + k, i + k + 1]);
+      for (const [a, b] of runs) {
+        solve(fixed.slice(a, b), b === j ? next : null).forEach((pick, k) => {
+          out.set(nights[a + k].slot, pick);
+          prev = pick;
+          ptr = indexOf.get(key(pick)) ?? ptr + 1;
+        });
+      }
+      i = j;
+    }
+    return out;
+  }
+
+  /** Effective roles for one night: stored roles, else the plan (or the plain rotation for past nights). */
+  function rolesFor(date: string, s: Settings, row: NightRow | null): Roles {
+    const order = q.activeOrder.all().map((p) => p.email);
+    const on = onDate(date, row);
+    const upcoming = on >= todayInTz(s.timezone, now());
+    const stored = storedRoles(row, order, upcoming);
+    if (stored.proposer && stored.chooser) return stored;
+    // Plan a little past this night so it can see the next fixed night.
+    const planned = upcoming ? plan(s, addDays(on, 31)).get(date) : null;
+    const rot = planned ?? rotationRoles(rotationIndex(date, s), order);
+    return { proposer: stored.proposer ?? rot.proposer, chooser: stored.chooser ?? rot.chooser };
+  }
+
+  /**
+   * When the recurring nights change, start the new schedule where the old one would have been:
+   * the first upcoming night keeps its place in the rotation cycle (used when there's no history).
+   */
+  function rotationStart(old: Settings, next: Settings): { anchor: string; base: number } {
+    const today = todayInTz(next.timezone, now());
+    const anchor = upcomingNightDates(today, weekdays(next), 0, 1)[0];
+    const n = q.activeOrder.all().length;
+    if (n < 2) return { anchor, base: 0 };
+    const first = upcomingNightDates(today, weekdays(old), 0, 1)[0];
+    const r = rolesFor(first, old, q.night.get(first));
+    const order = q.activeOrder.all().map((p) => p.email);
+    const i = rotationCycle(n).findIndex(([p, c]) => order[p] === r.proposer && order[c] === r.chooser);
+    return { anchor, base: i >= 0 ? i : rotationIndex(first, old) };
   }
 
   // ---------- views ----------
@@ -192,7 +324,8 @@ export function createApp({ db, auth, movies, adminEmails, library = null, now =
     return {
       date,              // rotation slot; identifies the night in the API
       on,                // the date it actually happens
-      time: row?.time ?? s.nightTime,
+      time: row?.time ?? regularTime(date, s),
+      regularTime: regularTime(date, s),
       movedFrom: row?.actual_date ? date : null,
       customTime: !!row?.time,
       isPast,
@@ -215,8 +348,12 @@ export function createApp({ db, auth, movies, adminEmails, library = null, now =
     const today = todayInTz(s.timezone, now());
     const all = q.participants.all();
     const names = new Map(all.map((p) => [p.email, p.name]));
-    const dates = new Set(upcomingNightDates(today, s.nightWeekday, UPCOMING_COUNT));
-    for (const r of q.nightsFrom.all(today)) dates.add(r.date); // off-schedule nights with data
+    // Regular nights for the next few weeks, extended to reach the furthest night already planned.
+    const stored = q.nightsFrom.all(today);
+    const furthest = stored.reduce((m, r) => (onDate(r.date, r) > m ? onDate(r.date, r) : m), today);
+    const days = Math.max(UPCOMING_DAYS, daysBetween(today, furthest) + 1);
+    const dates = new Set(upcomingNightDates(today, weekdays(s), days, UPCOMING_MIN).filter((d) => !taken(d)));
+    for (const r of stored) dates.add(r.date); // off-schedule nights with data
     const upcoming = [...dates].map((d) => nightView(d, s, today, me, names))
       .filter((n) => !n.isPast) // regular dates whose night was moved earlier
       .sort((x, y) => x.on.localeCompare(y.on) || x.date.localeCompare(y.date));
@@ -508,13 +645,13 @@ export function createApp({ db, auth, movies, adminEmails, library = null, now =
       const on = b.on === null || b.on === "" ? slot : String(b.on);
       if (!isIsoDate(on)) throw new HttpError(400, "bad_date", "Pick a valid date");
       const clash = q.nightOn.get(on, slot)
-        ?? (on !== slot && weekdayOf(on) === s.nightWeekday && !q.night.get(on)?.actual_date ? { date: on } : null);
+        ?? (on !== slot && weekdays(s).includes(weekdayOf(on)) && !q.night.get(on)?.actual_date ? { date: on } : null);
       if (clash) throw new HttpError(409, "date_taken", "There's already a movie night on that date");
       actual = on === slot ? null : on;
     }
     if ("time" in b) {
       if (b.time === null || b.time === "") time = null;
-      else if (/^([01]\d|2[0-3]):[0-5]\d$/.test(String(b.time))) time = String(b.time) === s.nightTime ? null : String(b.time);
+      else if (/^([01]\d|2[0-3]):[0-5]\d$/.test(String(b.time))) time = String(b.time) === regularTime(slot, s) ? null : String(b.time);
       else throw new HttpError(400, "bad_time", "Pick a valid time");
     }
     db.transaction(() => {
@@ -620,24 +757,20 @@ export function createApp({ db, auth, movies, adminEmails, library = null, now =
       if (!t || t.length > 60) throw new HttpError(400, "bad_title");
       updates.push(["title", t]);
     }
-    if ("nightWeekday" in b) {
-      const w = Number(b.nightWeekday);
-      if (!Number.isInteger(w) || w < 0 || w > 6) throw new HttpError(400, "bad_weekday");
-      if (w !== s.nightWeekday) {
-        updates.push(["night_weekday", String(w)]);
-        // Keep the rotation continuous: the next night under the new weekday keeps the
-        // same rotation slot as the next night under the old one.
-        const today = todayInTz(s.timezone, now());
-        const oldNext = nextWeekday(today, s.nightWeekday);
-        const newNext = nextWeekday(today, w);
-        const shift = Math.round((Date.parse(newNext) - Date.parse(oldNext)) / 86_400_000);
-        updates.push(["rotation_anchor", new Date(Date.parse(s.rotationAnchor) + shift * 86_400_000).toISOString().slice(0, 10)]);
+    if ("schedule" in b) {
+      const list = Array.isArray(b.schedule) ? b.schedule : [];
+      const sched: NightDay[] = list.map((d: any) => ({ weekday: Number(d?.weekday), time: String(d?.time ?? "") }));
+      if (!sched.length) throw new HttpError(400, "bad_schedule", "Pick at least one night of the week");
+      if (sched.some((d) => !Number.isInteger(d.weekday) || d.weekday < 0 || d.weekday > 6) || new Set(sched.map((d) => d.weekday)).size !== sched.length)
+        throw new HttpError(400, "bad_schedule", "Invalid days");
+      if (sched.some((d) => !/^([01]\d|2[0-3]):[0-5]\d$/.test(d.time))) throw new HttpError(400, "bad_time", "Pick a start time for each night");
+      sched.sort((x, y) => x.weekday - y.weekday);
+      const daysChanged = weekdays(s).slice().sort().join() !== sched.map((d) => d.weekday).join();
+      updates.push(["schedule", JSON.stringify(sched)]);
+      if (daysChanged) {
+        const start = rotationStart(s, { ...s, schedule: sched });
+        updates.push(["rotation_anchor", start.anchor], ["rotation_base", String(start.base)]);
       }
-    }
-    if ("nightTime" in b) {
-      const t = String(b.nightTime);
-      if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(t)) throw new HttpError(400, "bad_time");
-      updates.push(["night_time", t]);
     }
     if ("timezone" in b) {
       if (!isValidTimezone(String(b.timezone))) throw new HttpError(400, "bad_timezone", "Unknown timezone");
