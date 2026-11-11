@@ -481,6 +481,7 @@ function renderParticipants() {
         <button class="btn small ghost" data-action="p-up" data-email="${esc(p.email)}" ${i === 0 ? "disabled" : ""} aria-label="Move up">↑</button>
         <button class="btn small ghost" data-action="p-down" data-email="${esc(p.email)}" ${i === active.length - 1 ? "disabled" : ""} aria-label="Move down">↓</button>
         <button class="btn small ghost" data-action="p-rename" data-email="${esc(p.email)}">Rename</button>
+        ${p.email !== state.me.email ? `<button class="btn small ghost" data-action="p-email" data-email="${esc(p.email)}">Change email</button>` : ""}
         <button class="btn small ghost" data-action="p-admin" data-email="${esc(p.email)}">${p.isAdmin ? "Revoke admin" : "Make admin"}</button>
         <button class="btn small ghost" data-action="p-remove" data-email="${esc(p.email)}">Remove</button>`
       : `<button class="btn small" data-action="p-restore" data-email="${esc(p.email)}">Restore</button>`}
@@ -553,6 +554,12 @@ document.addEventListener("click", async (e) => {
     case "pick-user": await act(() => api("POST", "/api/picker", { email })); return boot();
     case "p-up": return reorder(email, -1);
     case "p-down": return reorder(email, 1);
+    case "p-email": {
+      const p = state.participants.find((x) => x.email === email);
+      const next = prompt(`New Google account email for ${p.name}. Their nights, proposals and picks move with them.`, p.email);
+      if (next && next.trim() && next.trim().toLowerCase() !== p.email) await patchP(email, { email: next.trim() }, "Email updated");
+      return;
+    }
     case "p-rename": {
       const p = state.participants.find((x) => x.email === email);
       const name = prompt(`Display name for ${p.email}`, p.name);

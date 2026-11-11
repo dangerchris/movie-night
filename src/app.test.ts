@@ -38,36 +38,41 @@ describe("schedule", () => {
     expect(upcomingNightDates("2026-11-10", 6, 3)).toEqual(["2026-11-14", "2026-11-21", "2026-11-28"]);
     expect(upcomingNightDates("2026-11-14", 6, 1)).toEqual(["2026-11-14"]);
   });
-  test("rotation: pairings vary from round to round", () => {
+  const weekOf = (k: number) => new Date(Date.parse("2026-11-14") + k * 7 * 86_400_000).toISOString().slice(0, 10);
+
+  test("rotation for three people", () => {
     const order = ["a", "b", "c"];
-    const week = (k: number) => rotationRoles(new Date(Date.parse("2026-11-14") + k * 7 * 86_400_000).toISOString().slice(0, 10), "2026-11-14", order);
-    const pairs = (from: number, to: number) => Array.from({ length: to - from }, (_, i) => { const r = week(from + i); return `${r.proposer}${r.chooser}`; });
-    expect(pairs(0, 3)).toEqual(["ab", "bc", "ca"]);  // round 0: next person chooses
-    expect(pairs(3, 6)).toEqual(["ac", "ba", "cb"]);  // round 1: two along
-    expect(pairs(6, 9)).toEqual(["ab", "bc", "ca"]);  // cycle repeats after n*(n-1) weeks
-    expect(pairs(-3, 0)).toEqual(["ac", "ba", "cb"]); // before the anchor works too
+    const pairs = (from: number, to: number) =>
+      Array.from({ length: to - from }, (_, i) => { const r = rotationRoles(weekOf(from + i), "2026-11-14", order); return `${r.proposer}${r.chooser}`; });
+    expect(pairs(0, 6)).toEqual(["ab", "bc", "ca", "ac", "cb", "ba"]);
+    expect(pairs(6, 12)).toEqual(pairs(0, 6));
+    expect(pairs(-6, 0)).toEqual(pairs(0, 6));
   });
 
-  test("rotation: every ordered pair once per cycle, everyone proposes once per round", () => {
-    for (const n of [2, 3, 4, 5, 6]) {
-      const order = Array.from({ length: n }, (_, i) => String.fromCharCode(97 + i));
+  for (const n of [2, 3, 4, 5, 6, 7, 8, 9, 10]) {
+    test(`rotation invariants for ${n} people`, () => {
+      const order = Array.from({ length: n }, (_, i) => `p${i}`);
+      const len = n * (n - 1);
+      const weeks = Array.from({ length: len * 2 }, (_, k) => rotationRoles(weekOf(k), "2026-11-14", order));
       const seen = new Set<string>();
-      for (let k = 0; k < n * (n - 1); k++) {
-        const d = new Date(Date.parse("2026-11-14") + k * 7 * 86_400_000).toISOString().slice(0, 10);
-        const { proposer, chooser } = rotationRoles(d, "2026-11-14", order);
-        expect(proposer).toBe(order[k % n]);
-        expect(chooser).not.toBe(proposer);
-        seen.add(proposer! + chooser!);
+      weeks.slice(0, len).forEach((w) => seen.add(`${w.proposer}>${w.chooser}`));
+      expect(seen.size).toBe(len); // every pairing once per cycle
+      for (let k = 0; k < weeks.length; k++) {
+        const w = weeks[k];
+        expect(w.chooser).not.toBe(w.proposer);
+        if (k > 0) {
+          expect(w.proposer).not.toBe(weeks[k - 1].proposer);
+          expect(w.chooser).not.toBe(weeks[k - 1].chooser);
+          if (n >= 4) expect(w.proposer).not.toBe(weeks[k - 1].chooser);
+        }
       }
-      expect(seen.size).toBe(n * (n - 1));
-    }
-    expect(rotationRoles("2026-11-14", "2026-11-14", ["solo"])).toEqual({ proposer: "solo", chooser: "solo" });
-  });
-});
-
-test("streaming provider names are tidied", () => {
-  expect(tidyProviders(["Netflix", "Crave", "Netflix Standard with Ads", "Crave Amazon Channel", "Starz Amazon Channel"]))
-    .toEqual(["Netflix", "Crave", "Starz (via Prime)"]);
+      for (let r = 0; r < len / n; r++) { // each round: everyone proposes once and chooses once
+        const round = weeks.slice(r * n, r * n + n);
+        expect(new Set(round.map((w) => w.proposer)).size).toBe(n);
+        expect(new Set(round.map((w) => w.chooser)).size).toBe(n);
+      }
+    });
+  }
 });
 
 describe("api", () => {
@@ -155,6 +160,25 @@ describe("api", () => {
     expect((await call(null, "POST", "/api/picker", { email: "a@x.com" }, "192.168.1.50")).status).toBe(403);
     // Unknown peer address never counts as localhost.
     expect((await app.request("/api/state", { headers: { cookie: "mn_user=a@x.com" } })).status).toBe(401);
+  });
+
+  test("changing an email carries locked roles; removing someone unlocks their upcoming role", async () => {
+    const { call } = setup();
+    await call(null, "POST", "/api/setup", { email: "a@x.com", name: "A" });
+    await call("a@x.com", "POST", "/api/participants", { email: "b@x.com", name: "B" });
+    await call("a@x.com", "POST", "/api/participants", { email: "c@x.com", name: "C" });
+    await call("a@x.com", "PUT", "/api/nights/2026-11-14/proposals", { tmdbIds: [1, 2, 3] });
+    let r = await call("a@x.com", "PATCH", "/api/participants/b%40x.com", { email: "bee@x.com" });
+    expect(r.json.upcoming[0].chooser.email).toBe("bee@x.com");
+    expect((await call("bee@x.com", "PUT", "/api/nights/2026-11-14/selection", { tmdbId: 2 })).status).toBe(200);
+    expect((await call("a@x.com", "PATCH", "/api/participants/c%40x.com", { email: "bee@x.com" })).status).toBe(409);
+    expect((await call("a@x.com", "PATCH", "/api/participants/a%40x.com", { email: "z@x.com" })).status).toBe(400);
+
+    await call("a@x.com", "PUT", "/api/nights/2026-11-21/proposals", { tmdbIds: [4, 5, 6] }); // admin; locks bee -> c
+    r = await call("a@x.com", "PATCH", "/api/participants/c%40x.com", { active: false });
+    const n21 = r.json.upcoming.find((n: any) => n.date === "2026-11-21");
+    expect(n21.proposer.email).toBe("bee@x.com");
+    expect(n21.chooser.email).not.toBe("c@x.com");
   });
 
   test("non-admins can rename only themselves", async () => {

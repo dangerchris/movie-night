@@ -41,21 +41,64 @@ export function upcomingNightDates(today: string, weekday: number, count: number
   return Array.from({ length: count }, (_, i) => addDays(first, i * 7));
 }
 
+type Pair = [proposer: number, chooser: number];
+const cycleCache = new Map<number, Pair[]>();
+
 /**
- * Rotation: the night `k` weeks after the anchor has proposer = order[k mod n], so everyone
- * proposes once per round of n weeks. The chooser is `offset` places after the proposer, where
- * the offset steps through 1..n-1 from one round to the next; over n*(n-1) weeks every
- * proposer/chooser pairing happens exactly once and nobody chooses for themselves.
+ * The rotation for n people: a cycle of n*(n-1) weeks containing every proposer/chooser pairing
+ * exactly once, split into rounds of n weeks in which everyone proposes once and chooses once.
+ * Consecutive weeks (including the wrap-around) never repeat the proposer or the chooser, and when
+ * possible (n >= 4) this week's chooser doesn't propose next week either.
  */
+export function rotationCycle(n: number): Pair[] {
+  const cached = cycleCache.get(n);
+  if (cached) return cached;
+  const found = n < 2 ? [[0, 0] as Pair] : searchCycle(n, true) ?? searchCycle(n, false) ?? fallbackCycle(n);
+  cycleCache.set(n, found);
+  return found;
+}
+
+function searchCycle(n: number, avoidHandoff: boolean): Pair[] | null {
+  const len = n * (n - 1);
+  const used = new Set<number>();
+  const seq: Pair[] = [];
+  let budget = 200_000;
+  const ok = (a: Pair, b: Pair) => a[0] !== b[0] && a[1] !== b[1] && (!avoidHandoff || a[1] !== b[0]);
+  const dfs = (): boolean => {
+    if (--budget < 0) return false;
+    if (seq.length === len) return ok(seq[len - 1], seq[0]);
+    const k = seq.length;
+    const round = seq.slice(k - (k % n));
+    for (let p = 0; p < n; p++) {
+      if (round.some((x) => x[0] === p)) continue;
+      for (let c = 0; c < n; c++) {
+        if (c === p || used.has(p * n + c) || round.some((x) => x[1] === c)) continue;
+        const cand: Pair = [p, c];
+        if (k > 0 && !ok(seq[k - 1], cand)) continue;
+        used.add(p * n + c); seq.push(cand);
+        if (dfs()) return true;
+        used.delete(p * n + c); seq.pop();
+      }
+    }
+    return false;
+  };
+  return dfs() ? seq : null;
+}
+
+/** Simple offset rotation, only used if the search gives up (very large groups). */
+function fallbackCycle(n: number): Pair[] {
+  const out: Pair[] = [];
+  for (let r = 0; r < n - 1; r++) for (let i = 0; i < n; i++) out.push([i, (i + 1 + r) % n]);
+  return out;
+}
+
 export function rotationRoles(
   date: string, anchor: string, order: string[],
 ): { proposer: string | null; chooser: string | null } {
   const n = order.length;
   if (n === 0) return { proposer: null, chooser: null };
+  const cycle = rotationCycle(n);
   const k = Math.floor(daysBetween(anchor, date) / 7);
-  const mod = (x: number, m: number) => ((x % m) + m) % m;
-  if (n === 1) return { proposer: order[0], chooser: order[0] };
-  const round = Math.floor(k / n);
-  const offset = 1 + mod(round, n - 1);
-  return { proposer: order[mod(k, n)], chooser: order[mod(k + offset, n)] };
+  const [p, c] = cycle[((k % cycle.length) + cycle.length) % cycle.length];
+  return { proposer: order[p], chooser: order[c] };
 }

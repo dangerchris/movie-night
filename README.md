@@ -1,6 +1,6 @@
 # Movie Night
 
-Weekly movie night planner. Participants rotate roles: the **proposer** picks 3 movies, and the **chooser** picks which one gets watched. Everyone proposes once per round, in rotation order. The chooser moves one further along each round, so the pairings vary: with A, B and C, round one is A→B, B→C, C→A and round two is A→C, B→A, C→B. With n people, every proposer/chooser pairing comes up once every n×(n−1) weeks.
+Weekly movie night planner. Participants rotate roles: the **proposer** picks 3 movies, and the **chooser** picks which one gets watched. The rotation is a fixed cycle of n×(n−1) weeks for n people, in which every proposer/chooser pairing happens exactly once. Each round of n weeks has everyone proposing once and choosing once, and nobody proposes or chooses two weeks in a row, including across cycles. With 4 or more people, the chooser also never proposes the following week. With A, B and C the cycle is A→B, B→C, C→A, A→C, C→B, B→A.
 
 Built with Bun, Hono and `bun:sqlite`, using TMDB for search, posters and movie details. There is no build step.
 

@@ -125,11 +125,16 @@ export function createApp({ db, auth, movies, adminEmails, now = () => new Date(
     return c ? JSON.parse(c.data) : { id, title: `TMDB #${id}` };
   }
 
-  /** Effective roles: stored override, else the rotation. */
+  /**
+   * Effective roles: stored (locked or overridden) roles, else the rotation. On upcoming nights a
+   * stored role whose person has since been removed falls back to the rotation.
+   */
   function rolesFor(date: string, s: Settings, row: NightRow | null) {
     const order = q.activeOrder.all().map((p) => p.email);
     const rot = rotationRoles(date, s.rotationAnchor, order);
-    return { proposer: row?.proposer_email ?? rot.proposer, chooser: row?.chooser_email ?? rot.chooser };
+    const upcoming = date >= todayInTz(s.timezone, now());
+    const keep = (e: string | null | undefined) => (e && (!upcoming || order.includes(e)) ? e : null);
+    return { proposer: keep(row?.proposer_email) ?? rot.proposer, chooser: keep(row?.chooser_email) ?? rot.chooser };
   }
 
   function isNightDate(date: string, s: Settings): boolean {
@@ -426,6 +431,23 @@ export function createApp({ db, auth, movies, adminEmails, now = () => new Date(
     const b = await body(c);
     const self = email === me.email;
     if (!me.is_admin && (!self || "active" in b || "isAdmin" in b)) throw new HttpError(403, "forbidden");
+    if ("email" in b) {
+      if (!me.is_admin) throw new HttpError(403, "forbidden");
+      const next = String(b.email ?? "").trim().toLowerCase();
+      if (!/^[^@\s]+@[^@\s]+$/.test(next)) throw new HttpError(400, "bad_email", "Enter a valid email");
+      if (next !== email) {
+        if (self) throw new HttpError(400, "self_email", "You can't change your own email (you'd be signed out)");
+        if (q.participant.get(next)) throw new HttpError(409, "exists", "Another participant already has that email");
+        db.transaction(() => {
+          db.query("UPDATE participants SET email = ? WHERE email = ?").run(next, email);
+          db.query("UPDATE nights SET proposer_email = ? WHERE proposer_email = ?").run(next, email);
+          db.query("UPDATE nights SET chooser_email = ? WHERE chooser_email = ?").run(next, email);
+          db.query("UPDATE nights SET selected_by = ? WHERE selected_by = ?").run(next, email);
+          db.query("UPDATE proposals SET proposed_by = ? WHERE proposed_by = ?").run(next, email);
+        })();
+        return c.json(stateView(me));
+      }
+    }
     if ("name" in b) {
       const name = String(b.name ?? "").trim();
       if (!name || name.length > 40) throw new HttpError(400, "bad_name", "Name must be 1 to 40 characters");
