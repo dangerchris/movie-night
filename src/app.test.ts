@@ -209,17 +209,28 @@ describe("api", () => {
     expect(r.json.upcoming.find((n: any) => n.date === "2026-11-21")).toMatchObject({ on: "2026-11-21", movedFrom: null, time: "19:30" });
   });
 
-  test("proposal history lists unpicked movies from other nights; search marks watched", async () => {
+  test("proposal history lists passed-over movies from settled nights; search marks watched", async () => {
     const { call } = setup();
     await call(null, "POST", "/api/setup", { email: "a@x.com", name: "A" });
     await call("a@x.com", "PUT", "/api/nights/2026-11-14/proposals", { tmdbIds: [1, 2, 3] });
     await call("a@x.com", "PUT", "/api/nights/2026-11-14/selection", { tmdbId: 2 });
     await call("a@x.com", "PUT", "/api/nights/2026-11-21/proposals", { tmdbIds: [3, 4, 5] });
+    // Nov 21 is still waiting for a pick, so its movies aren't offered yet.
     let r = await call("a@x.com", "GET", "/api/proposal-history?exclude=2026-11-28");
-    expect(r.json.movies.map((m: any) => m.id)).toEqual([3, 4, 5, 1]); // newest first, 2 was picked, 3 deduped
-    expect(r.json.movies[0]).toMatchObject({ lastProposed: "2026-11-21", proposedBy: "A", times: 2 });
-    r = await call("a@x.com", "GET", "/api/proposal-history?exclude=2026-11-21");
     expect(r.json.movies.map((m: any) => m.id)).toEqual([1, 3]);
+    expect(r.json.movies[1]).toMatchObject({ lastProposed: "2026-11-14", proposedBy: "A" });
+    // Once Nov 21 is picked, its other two join the list (newest first; 3 deduped; picked ones never listed).
+    await call("a@x.com", "PUT", "/api/nights/2026-11-21/selection", { tmdbId: 4 });
+    r = await call("a@x.com", "GET", "/api/proposal-history?exclude=2026-11-28");
+    expect(r.json.movies.map((m: any) => m.id)).toEqual([3, 5, 1]);
+    expect(r.json.movies[0]).toMatchObject({ lastProposed: "2026-11-21", times: 2 });
+    // A past night with no pick counts as settled too.
+    await call("a@x.com", "PUT", "/api/nights/2026-11-28/proposals", { tmdbIds: [6, 7, 8] });
+    await call("a@x.com", "PUT", "/api/nights/2026-11-28/schedule", { on: "2026-11-09" });
+    r = await call("a@x.com", "GET", "/api/proposal-history?exclude=2026-12-05");
+    expect(r.json.movies.map((m: any) => m.id)).toEqual([3, 5, 1, 6, 7, 8]);
+    r = await call("a@x.com", "GET", "/api/proposal-history?exclude=2026-11-21");
+    expect(r.json.movies.map((m: any) => m.id)).toEqual([1, 3, 6, 7, 8]);
     r = await call("a@x.com", "GET", "/api/search?q=thing");
     expect(r.json.results.map((m: any) => m.watched)).toEqual([null, "2026-11-14"]);
   });

@@ -92,12 +92,14 @@ export function createApp({ db, auth, movies, adminEmails, library = null, now =
        ORDER BY COALESCE(n.actual_date, n.date) DESC LIMIT ?`),
     nightOn: db.query<{ date: string }, [string, string]>(
       "SELECT date FROM nights WHERE COALESCE(actual_date, date) = ? AND date != ?"),
-    // Movies proposed on other nights that were never picked anywhere, newest first.
-    proposalHistory: db.query<{ tmdb_id: number; night: string; on_date: string; proposed_by: string | null; times: number }, [string]>(
+    // Movies passed over on settled nights (a pick was made, or the night is past) and never picked
+    // anywhere, newest first. Nights still waiting for a pick don't count yet.
+    proposalHistory: db.query<{ tmdb_id: number; night: string; on_date: string; proposed_by: string | null; times: number }, [string, string]>(
       `SELECT p.tmdb_id, p.night_date AS night, COALESCE(n.actual_date, n.date) AS on_date, p.proposed_by,
               COUNT(*) OVER (PARTITION BY p.tmdb_id) AS times
          FROM proposals p JOIN nights n ON n.date = p.night_date
         WHERE p.night_date != ?
+          AND (n.selected_tmdb_id IS NOT NULL OR COALESCE(n.actual_date, n.date) < ?)
           AND p.tmdb_id NOT IN (SELECT selected_tmdb_id FROM nights WHERE selected_tmdb_id IS NOT NULL)
         ORDER BY on_date DESC, p.slot`),
     picked: db.query<{ id: number; on_date: string }, []>(
@@ -414,7 +416,7 @@ export function createApp({ db, auth, movies, adminEmails, library = null, now =
     const exclude = c.req.query("exclude") ?? "";
     const seen = new Set<number>();
     const movies = [];
-    for (const r of q.proposalHistory.all(exclude)) {
+    for (const r of q.proposalHistory.all(exclude, todayInTz(s.timezone, now()))) {
       if (seen.has(r.tmdb_id)) continue;
       seen.add(r.tmdb_id);
       const m = movieView(cachedMovie(r.tmdb_id), s.region);
