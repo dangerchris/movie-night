@@ -133,6 +133,8 @@ section + section { margin-top: 36px; }
 .poster-title .yr { color: var(--muted); }
 .slot-empty { aspect-ratio: 2 / 3; border: 1.5px dashed var(--line); border-radius: 10px; display: grid; place-items: center; color: var(--line); font-size: 30px; font-family: Fraunces, serif; }
 .night-head .btn { margin-left: auto; }
+.link-btn { display: block; background: none; border: 0; padding: 0; margin-top: 2px; font: inherit; font-size: 12px; color: var(--accent); cursor: pointer; text-align: left; }
+.link-btn:hover { text-decoration: underline; }
 .moved { font-size: 12px; color: var(--muted); font-style: italic; }
 .night-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 16px; }
 

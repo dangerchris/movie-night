@@ -180,8 +180,10 @@ function nightHtml(n, isNext) {
 function pastHtml(n) {
   const m = n.proposals.find((p) => p.id === n.selectedId);
   const date = fmtDate(n.on, { month: "short", day: "numeric", year: "numeric" });
-  if (!m) return `<div class="past-item"><div class="slot-empty">-</div><div class="meta"><b>No pick</b>${esc(date)}</div></div>`;
-  return `<div class="past-item">${posterHtml(m, { size: "w185" })}<div class="meta"><b>${esc(m.title)}</b>${esc(date)} · ${esc(n.chooser?.name ?? "")}</div></div>`;
+  const edit = n.canOverride ? `<button class="link-btn" data-action="schedule" data-date="${n.date}">Change date</button>` : "";
+  const moved = n.movedFrom ? ` <span class="moved">(moved)</span>` : "";
+  if (!m) return `<div class="past-item"><div class="slot-empty">-</div><div class="meta"><b>No pick</b>${esc(date)}${moved}${edit}</div></div>`;
+  return `<div class="past-item">${posterHtml(m, { size: "w185" })}<div class="meta"><b>${esc(m.title)}</b>${esc(date)} · ${esc(n.chooser?.name ?? "")}${moved}${edit}</div></div>`;
 }
 
 function renderUserbar() {
@@ -527,6 +529,7 @@ function openSchedule(date) {
 $("#schedule-save").addEventListener("click", async () => {
   const f = $("#schedule-form");
   if (!f.on.value || !f.time.value) return toast("Pick a date and time", true);
+  if (f.on.value < state.today && !confirm(`${fmtDate(f.on.value, { weekday: "long", month: "short", day: "numeric" })} has already passed. Move this night into the past?`)) return;
   if (await act(() => api("PUT", `/api/nights/${scheduleDate}/schedule`, { on: f.on.value, time: f.time.value }), "Night updated")) scheduleDlg.close();
 });
 $("#schedule-reset").addEventListener("click", async () => {
