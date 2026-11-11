@@ -19,6 +19,25 @@ const app = createApp({
   },
 });
 
+// The page references app.js/style.css with a content hash so Cloudflare and browsers never serve
+// stale code after a deploy; hashed assets can then be cached forever.
+async function assetVersion(): Promise<string> {
+  const hasher = new Bun.CryptoHasher("sha1");
+  for (const f of ["app.js", "style.css"]) hasher.update(await Bun.file(`./public/${f}`).arrayBuffer());
+  return hasher.digest("hex").slice(0, 12);
+}
+app.get("/", async (c) => {
+  const v = await assetVersion();
+  const html = (await Bun.file("./public/index.html").text())
+    .replace('href="/style.css"', `href="/style.css?v=${v}"`)
+    .replace('src="/app.js"', `src="/app.js?v=${v}"`);
+  return c.html(html, 200, { "Cache-Control": "no-cache" });
+});
+app.get("/index.html", (c) => c.redirect("/"));
+app.use("/*", async (c, next) => {
+  await next();
+  if (c.res.ok) c.res.headers.set("Cache-Control", c.req.query("v") ? "public, max-age=31536000, immutable" : "no-cache");
+});
 app.use("/*", serveStatic({ root: "./public" }));
 
 const port = Number(env.PORT ?? 8795);
