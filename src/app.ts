@@ -548,6 +548,13 @@ export function createApp({ db, auth, movies, adminEmails, library = null, now =
 
   app.get("/api/state", (c) => c.json(stateView(requireMe(c))));
 
+  /** How many settled nights each never-picked movie was proposed on (and passed over). */
+  function passedOverCounts(): Map<number, number> {
+    const m = new Map<number, number>();
+    for (const r of q.passedOver.all()) m.set(r.tmdb_id, (m.get(r.tmdb_id) ?? 0) + 1);
+    return m;
+  }
+
   /** Picked movies -> the date of the night they were picked for. */
   function watchedMap(s: Settings) {
     const dates = datesById(s);
@@ -587,11 +594,12 @@ export function createApp({ db, auth, movies, adminEmails, library = null, now =
     const query = (c.req.query("q") ?? "").trim();
     if (query.length < 2) return c.json({ results: [] });
     const watched = watchedMap(getSettings());
+    const passed = passedOverCounts();
     const [results, lib] = await Promise.all([movies.search(query), libraryIndex()]);
     return c.json({
       results: results.map((r) => {
         const inLib = lib?.byTmdb.get(r.id);
-        return { ...r, watched: watched.get(r.id) ?? null, inLibrary: !!inLib, seenBy: inLib?.seenBy ?? [] };
+        return { ...r, watched: watched.get(r.id) ?? null, inLibrary: !!inLib, seenBy: inLib?.seenBy ?? [], passedOver: passed.get(r.id) ?? 0 };
       }),
     });
   });
@@ -603,6 +611,7 @@ export function createApp({ db, auth, movies, adminEmails, library = null, now =
     if (!lib) return c.json({ enabled: !!library, movies: [], matchedUsers: [] });
     const s = getSettings();
     const watched = watchedMap(s);
+    const passed = passedOverCounts();
     const unseen = lib.list.filter((m) => m.seenBy.length === 0 && !watched.has(m.tmdbId));
     void warmMovieCache(unseen.map((m) => m.tmdbId));
     return c.json({
@@ -611,7 +620,7 @@ export function createApp({ db, auth, movies, adminEmails, library = null, now =
       movies: unseen.map((m) => {
         const cached = q.cachedMovie.get(m.tmdbId);
         const base = cached ? movieView(JSON.parse(cached.data), s.region) : { id: m.tmdbId, title: m.title, year: m.year ? String(m.year) : null, posterPath: null };
-        return { ...base, inLibrary: true, jellyfinId: m.jellyfinId, added: m.added };
+        return { ...base, inLibrary: true, jellyfinId: m.jellyfinId, added: m.added, passedOver: passed.get(m.tmdbId) ?? 0 };
       }),
     });
   });
@@ -641,15 +650,14 @@ export function createApp({ db, auth, movies, adminEmails, library = null, now =
       .filter((r) => r.night_id !== excludeId)
       .map((r) => ({ ...r, on: r.held_on ?? dates.get(r.night_id) ?? "" }))
       .sort((a, b) => b.on.localeCompare(a.on) || a.slot - b.slot);
-    const times = new Map<number, number>();
-    for (const r of rows) times.set(r.tmdb_id, (times.get(r.tmdb_id) ?? 0) + 1);
+    const passed = passedOverCounts();
     const seen = new Set<number>();
     const list = [];
     for (const r of rows) {
       if (seen.has(r.tmdb_id)) continue;
       seen.add(r.tmdb_id);
       const m = movieView(cachedMovie(r.tmdb_id), s.region);
-      list.push({ ...m, lastProposed: r.on, proposedBy: r.proposed_by ? names.get(r.proposed_by) ?? r.proposed_by : null, times: times.get(r.tmdb_id) });
+      list.push({ ...m, lastProposed: r.on, proposedBy: r.proposed_by ? names.get(r.proposed_by) ?? r.proposed_by : null, passedOver: passed.get(r.tmdb_id) ?? 0 });
     }
     return c.json({ movies: list });
   });

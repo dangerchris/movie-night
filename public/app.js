@@ -287,6 +287,7 @@ function popHtml(m, action) {
         ${m.directors?.length ? `<dt>Director</dt><dd>${esc(m.directors.join(", "))}</dd>` : ""}
         ${cast ? `<dt>Starring</dt><dd>${cast}</dd>` : ""}
         ${streaming}
+        ${m.passedOver ? `<dt>History</dt><dd>${passedHtml(m)}</dd>` : ""}
       </dl>
       <div class="pop-foot">
         <div class="pop-links">
@@ -432,6 +433,13 @@ function resultHtml(m, caption) {
   </button>`;
 }
 
+/** "Passed over 2×": proposed on that many settled nights without being picked. */
+function passedHtml(m) {
+  const n = m.passedOver ?? 0;
+  if (!n) return "";
+  return `<span class="passed" title="Proposed on ${n} night${n > 1 ? "s" : ""} without being picked">Passed over ${n === 1 ? "once" : `${n}×`}</span>`;
+}
+
 function showSuggestions() {
   searchSeq++; // drop any in-flight search
   const box = $("#search-results");
@@ -444,13 +452,13 @@ function showSuggestions() {
   let html = "";
   if (past.length)
     html += `<p class="results-heading">Proposed before, never picked</p>`
-      + past.map((m) => resultHtml(m, `${esc(when(m))}${m.proposedBy ? ` · ${esc(m.proposedBy)}` : ""}${m.times > 1 ? ` · ${m.times}×` : ""}`)).join("");
+      + past.map((m) => resultHtml(m, `${passedHtml(m)}<br>Last: ${esc(when(m))}${m.proposedBy ? ` · ${esc(m.proposedBy)}` : ""}`)).join("");
   if (libraryMovies === null)
     html += `<p class="results-heading muted">Loading the Jellyfin library…</p>`;
   else if (lib.length) {
     const who = libraryUsers.length ? `nobody (${libraryUsers.join(", ")}) has watched` : "unwatched";
     html += `<p class="results-heading">In the library, ${esc(who)}<span class="muted small"> · ${lib.length}, newest first</span></p>`
-      + lib.map((m) => resultHtml(m, "")).join("");
+      + lib.map((m) => resultHtml(m, passedHtml(m))).join("");
   }
   box.innerHTML = html
     ? `<p class="results-hint muted small">Pick from these, or search for any movie above.</p>` + html
@@ -487,6 +495,7 @@ async function runSearch() {
       ? results.map((m) => resultHtml(m, [
           m.watched ? `<span class="badge picked">Watched ${esc(fmtDate(m.watched, { month: "short", day: "numeric" }))}</span>` : "",
           m.inLibrary ? `<span class="badge lib">In library</span>` : "",
+          passedHtml(m),
           m.seenBy?.length ? `Seen by ${esc(m.seenBy.join(", "))}` : "",
         ].filter(Boolean).join(" "))).join("")
       : `<p class="muted small">No matches.</p>`;

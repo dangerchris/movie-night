@@ -360,7 +360,7 @@ describe("api", () => {
     await call("a@x.com", "PUT", "/api/nights/2026-11-21/selection", { tmdbId: 4 });
     r = await call("a@x.com", "GET", "/api/proposal-history?exclude=2026-11-28");
     expect(r.json.movies.map((m: any) => m.id)).toEqual([3, 5, 1]);
-    expect(r.json.movies[0]).toMatchObject({ lastProposed: "2026-11-21", times: 2 });
+    expect(r.json.movies[0]).toMatchObject({ lastProposed: "2026-11-21", passedOver: 2 });
     // A past night with no pick counts as settled too.
     await call("a@x.com", "PUT", "/api/nights/2026-11-28/proposals", { tmdbIds: [6, 7, 8] });
     await call("a@x.com", "PUT", "/api/nights/2026-11-28/schedule", { on: "2026-11-09" });
@@ -370,6 +370,7 @@ describe("api", () => {
     expect(r.json.movies.map((m: any) => m.id)).toEqual([1, 3, 6, 7, 8]);
     r = await call("a@x.com", "GET", "/api/search?q=thing");
     expect(r.json.results.map((m: any) => m.watched)).toEqual([null, "2026-11-14"]);
+    expect(r.json.results.map((m: any) => m.passedOver)).toEqual([1, 0]); // 1 passed over on Nov 14; 2 was picked
   });
 
   test("library lists movies no participant has seen; search marks library and seen-by", async () => {
