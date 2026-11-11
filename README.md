@@ -133,7 +133,7 @@ deploy/           systemd unit
 
 ## Deployment
 
-Production runs on the home media server (`user@server`) as a systemd service. It's reached at `https://movienight.example.com` through the server's Cloudflare tunnel, with Cloudflare Access in front.
+The app is meant to run on an always-on machine at home (a media server, NAS or similar) as a systemd service, reached from outside through a Cloudflare tunnel with Cloudflare Access in front. In the commands below, `user@server` is the SSH login for that machine.
 
 First install:
 
@@ -141,6 +141,7 @@ First install:
 rsync -a --exclude node_modules --exclude data --exclude .env --exclude .git ./ user@server:movie-night/
 ssh user@server 'cd movie-night && ~/.bun/bin/bun install --production'
 # create ~/movie-night/.env on the server (chmod 600; see Configuration)
+# edit deploy/movie-night.service: set User and the paths for your server
 ssh user@server 'sudo cp movie-night/deploy/movie-night.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now movie-night'
 ```
 

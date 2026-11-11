@@ -1,3 +1,6 @@
+# Edit User and the paths to match your server, then install with:
+#   sudo cp deploy/movie-night.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now movie-night
 [Unit]
 Description=Movie Night
 After=network-online.target
