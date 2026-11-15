@@ -395,6 +395,30 @@ export function createApp({ db, auth, movies, adminEmails, library = null, notif
   const movieTitle = (id: number) => (cachedMovie(id) as { title: string }).title;
   const titleList = (ids: number[]) => ids.flatMap((id, i): Part[] =>
     [i === 0 ? "" : i === ids.length - 1 ? " or " : ", ", { movie: id }]);
+  const personList = (emails: string[]) => emails.flatMap((e, i): Part[] =>
+    [i === 0 ? "" : i === emails.length - 1 ? " and " : ", ", { person: e }]);
+  const starLabel = (halves: number) => `${halves % 2 ? (halves / 2).toFixed(1) : halves / 2}★`;
+
+  /** Active participants who haven't rated a night's pick yet. */
+  const unrated = (nightId: number) => {
+    const rated = new Set(q.ratings.all(nightId).map((r) => r.email));
+    return q.activeOrder.all().map((p) => p.email).filter((e) => !rated.has(e));
+  };
+
+  /** Once everyone has rated a night's pick, post the results (once per night and movie). */
+  function announceIfAllRated(entry: Entry) {
+    const movie = entry.selected_tmdb_id;
+    if (!notifier || !movie || unrated(entry.id).length) return;
+    const key = `rated-all:${entry.id}:${movie}`;
+    if (db.query("SELECT 1 FROM notifications WHERE key = ?").get(key)) return;
+    db.query("INSERT INTO notifications (key) VALUES (?)").run(key);
+    const ratings = q.ratings.all(entry.id);
+    const liked = new Set(q.likes.all(entry.id).map((r) => r.email));
+    const avg = Math.round((ratings.reduce((a, r) => a + r.halves, 0) / 2 / ratings.length) * 10) / 10;
+    const each = ratings.flatMap((r, i): Part[] =>
+      [i ? ", " : "", { person: r.email }, ` ${starLabel(r.halves)}${liked.has(r.email) ? " ♥" : ""}`]);
+    announce(["Everyone has rated ", { movie }, `: ${avg}★ on average (`, ...each, ")."]);
+  }
 
   function compose(parts: Part[]) {
     let text = "", html = "";
@@ -430,7 +454,8 @@ export function createApp({ db, auth, movies, adminEmails, library = null, notif
   /**
    * Scheduled reminders, each sent once: the proposer two days before (10:00) and on the day (10:00)
    * if there are no choices yet; the chooser on the day (10:00) if nothing is picked; and a "tonight"
-   * note at noon once a movie is picked. Nothing is sent once the night has started.
+   * note at noon once a movie is picked. Nothing is sent once the night has started. The morning after
+   * (10:00), whoever hasn't rated the pick is asked to.
    */
   async function runReminders() {
     if (!notifier) return;
@@ -464,6 +489,13 @@ export function createApp({ db, auth, movies, adminEmails, library = null, notif
         await once(`tonight:${n.date}:${picked}`, [`Tonight at ${timeLabel(n.time)}: `, { movie: picked },
           ", picked by ", { person: n.entry?.selected_by ?? n.roles.chooser }, "."]);
       }
+    }
+    if (clock >= "10:00") {
+      const last = q.heldOn.get(addDays(t, -1));
+      const missing = last?.selected_tmdb_id ? unrated(last.id) : [];
+      if (last?.selected_tmdb_id && missing.length)
+        await once(`rate-ask:${last.id}:${last.selected_tmdb_id}`, ["How was ", { movie: last.selected_tmdb_id }, "? ",
+          ...personList(missing), `, rate it (and like it if you loved it).`]);
     }
   }
 
@@ -873,6 +905,7 @@ export function createApp({ db, auth, movies, adminEmails, library = null, notif
       db.query(`INSERT INTO ratings (night_id, email, halves) VALUES (?, ?, ?)
                 ON CONFLICT (night_id, email) DO UPDATE SET halves = excluded.halves, updated_at = CURRENT_TIMESTAMP`)
         .run(entry.id, me.email, halves);
+      announceIfAllRated(entry);
     }
     return c.json(stateView(me));
   });

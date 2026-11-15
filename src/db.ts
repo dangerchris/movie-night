@@ -104,8 +104,9 @@ const MIGRATIONS: (string | ((db: Database) => void))[] = [
         db.query("INSERT OR REPLACE INTO calendar (date, kind, time) VALUES (?, 'time', ?)").run(r.date, r.time);
       }
     }
-    // Dates before today are settled; the lineup starts filling from today.
-    db.query("INSERT OR REPLACE INTO settings (key, value) VALUES ('lineup_through', ?)").run(addDays(today, -1));
+    // Dates before today are settled; the lineup starts filling from today. A new database has
+    // nothing to carry over, so it leaves this to the first settle (which uses the app's clock).
+    if (rows.length || all.length) db.query("INSERT OR REPLACE INTO settings (key, value) VALUES ('lineup_through', ?)").run(addDays(today, -1));
   },
   // Chat notifications: who to mention, and which reminders have gone out.
   `

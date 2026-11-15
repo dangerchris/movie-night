@@ -332,6 +332,32 @@ describe("api", () => {
     setDay("2026-11-15", "01:00"); // 8pm Toronto
     await app.runReminders();
     expect(sent).toHaveLength(5);
+
+    // The morning after (10:00): whoever hasn't rated is asked, once.
+    await call("b@x.com", "PUT", "/api/nights/2026-11-14/rating", { stars: 4.5 });
+    await call("b@x.com", "PUT", "/api/nights/2026-11-14/like", { liked: true });
+    setDay("2026-11-15", "14:00");
+    await app.runReminders();
+    expect(sent).toHaveLength(5);
+    setDay("2026-11-15", "15:05");
+    await app.runReminders();
+    await app.runReminders();
+    expect(sent).toHaveLength(6);
+    expect(sent[5].text).toContain("How was Movie 2? A and C, rate it");
+    // When the last person rates, the results are posted once.
+    await call("a@x.com", "PUT", "/api/nights/2026-11-14/rating", { stars: 3 });
+    await flush();
+    expect(sent).toHaveLength(6);
+    await call("c@x.com", "PUT", "/api/nights/2026-11-14/rating", { stars: 4 });
+    await call("c@x.com", "PUT", "/api/nights/2026-11-14/rating", { stars: 3.5 });
+    await flush();
+    expect(sent).toHaveLength(7);
+    expect(sent[6].text).toContain("Everyone has rated Movie 2: 3.8★ on average (A 3★, B 4.5★ ♥, C 4★).");
+    expect(sent[6].mentions).toEqual(["@bee:chat"]);
+    // Nobody left to ask the next day.
+    setDay("2026-11-16", "15:05");
+    await app.runReminders();
+    expect(sent).toHaveLength(7);
   });
 
   test("ratings: everyone rates the pick in half stars once the night has started", async () => {
