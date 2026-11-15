@@ -349,6 +349,7 @@ describe("api", () => {
     r = await call("a@x.com", "GET", "/api/state");
     expect(r.json.upcoming[0]).toMatchObject({ isToday: true, canRate: true, myRating: null, averageRating: null });
     for (const bad of [0, 5.5, 3.3, -1, "x"]) expect((await rate("a@x.com", bad)).status).toBe(400);
+    expect((await call("a@x.com", "PUT", "/api/nights/2026-11-21/like", { liked: true })).status).toBe(409); // not watched
     expect((await rate("a@x.com", 4.5)).json.upcoming[0].myRating).toBe(4.5);
     r = await rate("c@x.com", 2);
     expect(r.json.upcoming[0]).toMatchObject({ myRating: 2, averageRating: 3.3 });
@@ -362,11 +363,25 @@ describe("api", () => {
     expect(r.json.past[0].ratings.map((x: any) => `${x.person.name}:${x.stars}`)).toEqual(["A:4.5", "B:5"]);
     expect(r.json.past[0].averageRating).toBe(4.8);
 
-    // A different pick starts the ratings over; the same pick keeps them.
+    // Likes are separate from stars: you can like without rating, and take a like back.
+    const like = (who: string, liked: unknown) => call(who, "PUT", "/api/nights/2026-11-14/like", { liked });
+    expect((await like("c@x.com", "yes")).status).toBe(400);
+    expect((await like("c@x.com", true)).json.past[0]).toMatchObject({ myLike: true, myRating: null });
+    await like("c@x.com", true); // idempotent
+    r = await like("a@x.com", true);
+    expect(r.json.past[0].likes.map((p: any) => p.name)).toEqual(["C", "A"]);
+    expect(r.json.past[0].myLike).toBe(true);
+    r = await like("a@x.com", false);
+    expect(r.json.past[0]).toMatchObject({ myLike: false, myRating: 4.5 });
+    expect(r.json.past[0].likes.map((p: any) => p.name)).toEqual(["C"]);
+
+    // A different pick starts the ratings and likes over; the same pick keeps them.
     r = await call("a@x.com", "PUT", "/api/nights/2026-11-14/selection", { tmdbId: 2 });
     expect(r.json.past[0].ratings.length).toBe(2);
+    expect(r.json.past[0].likes.length).toBe(1);
     r = await call("a@x.com", "PUT", "/api/nights/2026-11-14/selection", { tmdbId: 3 });
     expect(r.json.past[0].ratings).toEqual([]);
+    expect(r.json.past[0].likes).toEqual([]);
   });
 
   test("runs of open nights between locked nights are planned without repeats when possible", async () => {

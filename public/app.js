@@ -95,9 +95,13 @@ function ratingHtml(n) {
   const avg = n.averageRating !== null
     ? `<span class="rating-avg" title="${esc(who)}">★ ${fmtStars(n.averageRating)} <span class="muted">· ${n.ratings.length} rating${n.ratings.length === 1 ? "" : "s"}</span></span>`
     : `<span class="muted">No ratings yet</span>`;
+  const likers = n.likes.map((p) => p?.name ?? "?").join(", ");
   return `<div class="rating">
-    <span class="rating-mine">${starsHtml(n.myRating, { date: n.date, label: "Your rating" })}</span>
+    <span class="rating-mine">${starsHtml(n.myRating, { date: n.date, label: "Your rating" })}<button type="button" class="like-btn"
+      data-action="like" data-date="${n.date}" aria-pressed="${n.myLike}" aria-label="${n.myLike ? "Unlike" : "Like"}"
+      title="${n.myLike ? "You liked this" : "Like"}">${n.myLike ? "♥" : "♡"}</button></span>
     ${avg}
+    ${n.likes.length ? `<span class="like-count" title="Liked by ${esc(likers)}">♥ ${n.likes.length}</span>` : ""}
   </div>`;
 }
 
@@ -312,7 +316,19 @@ function popAction(el, m) {
 function ratedNight(el, m) {
   const date = el.closest("[data-date]")?.dataset.date;
   const n = date && [...state.upcoming, ...state.past].find((x) => x.date === date);
-  return n && n.selectedId === m.id && n.ratings.length ? n : null;
+  return n && n.selectedId === m.id && (n.ratings.length || n.likes.length) ? n : null;
+}
+
+/** Each person's stars and/or heart, for the hover card. */
+function popRatingsHtml(n) {
+  const people = new Map();
+  for (const r of n.ratings) people.set(r.person?.email, { name: r.person?.name ?? "?", stars: r.stars, liked: false });
+  for (const p of n.likes) {
+    const row = people.get(p?.email) ?? { name: p?.name ?? "?", stars: null, liked: false };
+    people.set(p?.email, { ...row, liked: true });
+  }
+  return [...people.values()].map((p) => `<span>${esc(p.name)} ${p.stars !== null ? starsHtml(p.stars) : ""}${p.liked
+    ? ` <span class="like-mark" aria-label="liked">♥</span>` : ""}</span>`).join("");
 }
 
 function popHtml(m, action, night = null) {
@@ -340,8 +356,7 @@ function popHtml(m, action, night = null) {
         ${cast ? `<dt>Starring</dt><dd>${cast}</dd>` : ""}
         ${streaming}
         ${m.passedOver ? `<dt>History</dt><dd>${passedHtml(m)}</dd>` : ""}
-        ${night ? `<dt>Our ratings</dt><dd class="pop-ratings">${night.ratings.map((r) =>
-          `<span>${esc(r.person?.name ?? "?")} ${starsHtml(r.stars)}</span>`).join("")}</dd>` : ""}
+        ${night ? `<dt>Our ratings</dt><dd class="pop-ratings">${popRatingsHtml(night)}</dd>` : ""}
       </dl>
       <div class="pop-foot">
         <div class="pop-links">
@@ -733,6 +748,10 @@ document.addEventListener("click", async (e) => {
     case "settings": return openSettings();
     case "pick": hidePop(); return act(() => api("PUT", `/api/nights/${date}/selection`, { tmdbId: Number(id) }), "Picked!");
     case "unpick": return act(() => api("PUT", `/api/nights/${date}/selection`, { tmdbId: null }), "Pick cleared");
+    case "like": {
+      const n = [...state.upcoming, ...state.past].find((x) => x.date === date);
+      return act(() => api("PUT", `/api/nights/${date}/like`, { liked: !n?.myLike }), n?.myLike ? "Like removed" : "Liked");
+    }
     case "rate": {
       // Clicking your current rating again clears it.
       const n = [...state.upcoming, ...state.past].find((x) => x.date === date);

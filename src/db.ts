@@ -125,6 +125,15 @@ const MIGRATIONS: (string | ((db: Database) => void))[] = [
     PRIMARY KEY (night_id, email)
   );
   `,
+  // Likes (a heart) on a watched night's pick, separate from the star rating.
+  `
+  CREATE TABLE likes (
+    night_id   INTEGER NOT NULL,
+    email      TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (night_id, email)
+  );
+  `,
 ];
 
 export function openDb(path: string): Database {

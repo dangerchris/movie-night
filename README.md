@@ -6,7 +6,7 @@ A small self-hosted web app for a recurring movie night among a few friends. Eac
 - **Fair rotation:** everyone proposes and chooses once per round. Nobody gets the same role on consecutive nights, and the pairings vary.
 - **Proposing:** search all of TMDB. The dialog also suggests movies that were passed over before (with how many times) and unwatched movies from the Jellyfin library.
 - **Picking:** posters with a hover card showing rating, certification, runtime, a spoiler-light synopsis, director, cast, streaming services and a trailer link. The chooser picks from the card or the poster.
-- **Ratings:** once a night has started, everyone can rate the pick from 0.5 to 5 stars in half steps. Past nights show your rating and the group average, and the hover card lists everyone's.
+- **Ratings:** once a night has started, everyone can rate the pick from 0.5 to 5 stars in half steps and like it with a heart. Past nights show your rating, the group average and the like count, and the hover card lists everyone's.
 - **Sign-in:** Google login through Cloudflare Access. The app itself has no passwords.
 - **Chat reminders:** optional Matrix messages when it's someone's turn, when a movie is picked, and on the day.
 
