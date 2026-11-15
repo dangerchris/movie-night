@@ -162,11 +162,14 @@ section + section { margin-top: 36px; }
 .rate-row .star-rating { font-size: 24px; }
 .past-item .star-rating { font-size: 17px; }
 .rating-mine { display: inline-flex; align-items: center; gap: 6px; }
-.like-btn { background: none; border: 0; padding: 0 2px; font-size: 18px; line-height: 1; color: var(--muted); cursor: pointer; }
+.heart { width: 1em; height: 1em; vertical-align: -0.125em; fill: none; stroke: currentColor; stroke-width: 2; stroke-linejoin: round; }
+.heart.filled { fill: currentColor; }
+.like-btn { display: inline-flex; background: none; border: 0; padding: 0 2px; font-size: 17px; line-height: 1; color: var(--muted); cursor: pointer; }
 .like-btn:hover { color: var(--like); }
 .like-btn[aria-pressed="true"] { color: var(--like); }
 .like-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
-.rate-row .like-btn { font-size: 24px; }
+.rate-row .like-btn { font-size: 22px; }
+.like-count .heart, .like-mark .heart { width: .9em; height: .9em; }
 .like-count, .like-mark { color: var(--like); font-weight: 600; white-space: nowrap; }
 .pop-ratings { display: flex; flex-direction: column; gap: 2px; }
 .pop-ratings .star-rating { font-size: 13px; margin-left: 4px; }

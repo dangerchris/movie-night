@@ -99,11 +99,15 @@ function ratingHtml(n) {
   return `<div class="rating">
     <span class="rating-mine">${starsHtml(n.myRating, { date: n.date, label: "Your rating" })}<button type="button" class="like-btn"
       data-action="like" data-date="${n.date}" aria-pressed="${n.myLike}" aria-label="${n.myLike ? "Unlike" : "Like"}"
-      title="${n.myLike ? "You liked this" : "Like"}">${n.myLike ? "♥" : "♡"}</button></span>
+      title="${n.myLike ? "You liked this" : "Like"}">${heartSvg(n.myLike)}</button></span>
     ${avg}
-    ${n.likes.length ? `<span class="like-count" title="Liked by ${esc(likers)}">♥ ${n.likes.length}</span>` : ""}
+    ${n.likes.length ? `<span class="like-count" title="Liked by ${esc(likers)}">${heartSvg()} ${n.likes.length}</span>` : ""}
   </div>`;
 }
+
+/** A heart sized to the surrounding text: filled, or outlined when `filled` is false. */
+const heartSvg = (filled = true) => `<svg class="heart ${filled ? "filled" : ""}" viewBox="0 0 24 24" aria-hidden="true">
+  <path d="M12 20.5 4.2 12.9a4.9 4.9 0 0 1 0-7 4.9 4.9 0 0 1 6.9 0l.9.9.9-.9a4.9 4.9 0 0 1 6.9 0 4.9 4.9 0 0 1 0 7Z"/></svg>`;
 
 // Hovering a half star previews that rating; leaving shows the saved one again.
 document.addEventListener("pointerover", (e) => {
@@ -328,7 +332,7 @@ function popRatingsHtml(n) {
     people.set(p?.email, { ...row, liked: true });
   }
   return [...people.values()].map((p) => `<span>${esc(p.name)} ${p.stars !== null ? starsHtml(p.stars) : ""}${p.liked
-    ? ` <span class="like-mark" aria-label="liked">♥</span>` : ""}</span>`).join("");
+    ? ` <span class="like-mark" aria-label="liked">${heartSvg()}</span>` : ""}</span>`).join("");
 }
 
 function popHtml(m, action, night = null) {
