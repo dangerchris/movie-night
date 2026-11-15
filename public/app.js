@@ -67,6 +67,50 @@ function posterHtml(m, { size = "w342", cls = "", ribbon = "" } = {}) {
   return `<button type="button" class="poster ${cls}" data-movie="${m.id}" aria-label="${esc(m.title)}">${img}${ribbon ? `<span class="ribbon">${esc(ribbon)}</span>` : ""}</button>`;
 }
 
+// ---------- ratings ----------
+
+const fmtStars = (v) => (Number.isInteger(v) ? String(v) : v.toFixed(1));
+
+/** Five stars filled to `value`; when editable, each half star is a button that sets the rating. */
+function starsHtml(value, { date = null, label = "" } = {}) {
+  const pct = ((value ?? 0) / 5) * 100;
+  const halves = date
+    ? Array.from({ length: 10 }, (_, i) => {
+        const v = (i + 1) / 2;
+        return `<button type="button" class="star-half" style="left:${i * 10}%" data-action="rate" data-date="${date}" data-stars="${v}"
+          aria-label="${v} star${v === 1 ? "" : "s"}" aria-pressed="${value === v}"></button>`;
+      }).join("")
+    : "";
+  return `<span class="star-rating ${date ? "editable" : ""}" data-value="${value ?? 0}" role="${date ? "group" : "img"}"
+      aria-label="${esc(label || (value ? `${fmtStars(value)} of 5 stars` : "Not rated"))}">
+    <span class="star-base" aria-hidden="true">★★★★★</span>
+    <span class="star-fill" aria-hidden="true" style="width:${pct}%">★★★★★</span>${halves}
+  </span>`;
+}
+
+/** Your rating control plus the group's average for a watched night. */
+function ratingHtml(n) {
+  if (!n.canRate) return "";
+  const who = n.ratings.map((r) => `${r.person?.name ?? "?"}: ${fmtStars(r.stars)}`).join(", ");
+  const avg = n.averageRating !== null
+    ? `<span class="rating-avg" title="${esc(who)}">★ ${fmtStars(n.averageRating)} <span class="muted">· ${n.ratings.length} rating${n.ratings.length === 1 ? "" : "s"}</span></span>`
+    : `<span class="muted">No ratings yet</span>`;
+  return `<div class="rating">
+    <span class="rating-mine">${starsHtml(n.myRating, { date: n.date, label: "Your rating" })}</span>
+    ${avg}
+  </div>`;
+}
+
+// Hovering a half star previews that rating; leaving shows the saved one again.
+document.addEventListener("pointerover", (e) => {
+  const half = e.target.closest?.(".star-half");
+  if (half) half.parentElement.querySelector(".star-fill").style.width = `${(Number(half.dataset.stars) / 5) * 100}%`;
+});
+document.addEventListener("pointerout", (e) => {
+  const box = e.target.closest?.(".star-rating.editable");
+  if (box && !box.contains(e.relatedTarget)) box.querySelector(".star-fill").style.width = `${(Number(box.dataset.value) / 5) * 100}%`;
+});
+
 // ---------- rendering ----------
 
 function setState(s) {
@@ -185,6 +229,7 @@ function nightHtml(n, isNext) {
     </div>
     ${turnsHtml(n)}
     <p class="status">${statusHtml(n)}</p>
+    ${n.canRate ? `<div class="rate-row"><span class="rate-label">Your rating</span>${ratingHtml(n)}</div>` : ""}
     <div class="posters">${slots}</div>
     ${actions.length ? `<div class="night-actions">${actions.join("")}</div>` : ""}
   </article>`;
@@ -196,7 +241,7 @@ function pastHtml(n) {
   const edit = n.canOverride ? `<button class="link-btn" data-action="schedule" data-date="${n.date}">Change date</button>` : "";
   const moved = n.movedFrom ? ` <span class="moved">(moved)</span>` : "";
   if (!m) return `<div class="past-item"><div class="slot-empty">-</div><div class="meta"><b>No pick</b>${esc(date)}${moved}${edit}</div></div>`;
-  return `<div class="past-item">${posterHtml(m, { size: "w185" })}<div class="meta"><b>${esc(m.title)}</b>${esc(date)} · ${esc(n.chooser?.name ?? "")}${moved}${edit}</div></div>`;
+  return `<div class="past-item" data-date="${n.date}">${posterHtml(m, { size: "w185" })}<div class="meta"><b>${esc(m.title)}</b>${esc(date)} · ${esc(n.chooser?.name ?? "")}${moved}${edit}</div>${ratingHtml(n)}</div>`;
 }
 
 function renderUserbar() {
@@ -263,7 +308,14 @@ function popAction(el, m) {
   return `<button class="btn primary small" data-action="pick" data-date="${n.date}" data-id="${m.id}">${n.selectedId ? "Switch to this" : "Pick this"}</button>`;
 }
 
-function popHtml(m, action) {
+/** The night a poster belongs to, if it is the pick of a night that has ratings. */
+function ratedNight(el, m) {
+  const date = el.closest("[data-date]")?.dataset.date;
+  const n = date && [...state.upcoming, ...state.past].find((x) => x.date === date);
+  return n && n.selectedId === m.id && n.ratings.length ? n : null;
+}
+
+function popHtml(m, action, night = null) {
   const meta = [
     m.certification ? `<span class="cert">${esc(m.certification)}</span>` : "",
     m.rating ? `<span class="stars">★ ${m.rating.toFixed(1)}</span><span>(${m.voteCount.toLocaleString()})</span>` : "",
@@ -288,6 +340,8 @@ function popHtml(m, action) {
         ${cast ? `<dt>Starring</dt><dd>${cast}</dd>` : ""}
         ${streaming}
         ${m.passedOver ? `<dt>History</dt><dd>${passedHtml(m)}</dd>` : ""}
+        ${night ? `<dt>Our ratings</dt><dd class="pop-ratings">${night.ratings.map((r) =>
+          `<span>${esc(r.person?.name ?? "?")} ${starsHtml(r.stars)}</span>`).join("")}</dd>` : ""}
       </dl>
       <div class="pop-foot">
         <div class="pop-links">
@@ -316,7 +370,7 @@ async function showPop(el) {
 }
 
 function renderPop(el, m) {
-  pop.innerHTML = popHtml(m, popAction(el, m));
+  pop.innerHTML = popHtml(m, popAction(el, m), state ? ratedNight(el, m) : null);
   // Modal dialogs live in the top layer; the card must be inside one to show above it.
   const host = el.closest("dialog") ?? document.body;
   if (pop.parentElement !== host) host.appendChild(pop);
@@ -679,6 +733,13 @@ document.addEventListener("click", async (e) => {
     case "settings": return openSettings();
     case "pick": hidePop(); return act(() => api("PUT", `/api/nights/${date}/selection`, { tmdbId: Number(id) }), "Picked!");
     case "unpick": return act(() => api("PUT", `/api/nights/${date}/selection`, { tmdbId: null }), "Pick cleared");
+    case "rate": {
+      // Clicking your current rating again clears it.
+      const n = [...state.upcoming, ...state.past].find((x) => x.date === date);
+      const stars = Number(t.dataset.stars);
+      return act(() => api("PUT", `/api/nights/${date}/rating`, { stars: n?.myRating === stars ? null : stars }),
+        n?.myRating === stars ? "Rating cleared" : `Rated ${fmtStars(stars)} star${stars === 1 ? "" : "s"}`);
+    }
     case "draft-add": {
       const m = known.get(Number(id));
       if (m && draft.length < 3 && !draft.some((d) => d.id === m.id)) { draft.push(m); renderDraft(); }

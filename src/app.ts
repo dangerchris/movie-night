@@ -133,6 +133,8 @@ export function createApp({ db, auth, movies, adminEmails, library = null, notif
     insertEntry: db.query<{ id: number }, [number, string | null, string | null]>(
       "INSERT INTO lineup (seq, proposer_email, chooser_email) VALUES (?, ?, ?) RETURNING id"),
     setSeq: db.query("UPDATE lineup SET seq = ? WHERE id = ?"),
+    ratings: db.query<{ email: string; halves: number }, [number]>("SELECT email, halves FROM ratings WHERE night_id = ? ORDER BY updated_at, email"),
+    clearRatings: db.query("DELETE FROM ratings WHERE night_id = ?"),
   };
 
   function getSettings(): Settings {
@@ -357,6 +359,7 @@ export function createApp({ db, auth, movies, adminEmails, library = null, notif
   /** Resolve a night by its date: an upcoming night (by position) or a past one. */
   function resolve(s: Settings, date: string): { kind: "upcoming"; night: Upcoming } | { kind: "past"; entry: Entry } {
     if (!isIsoDate(date)) throw new HttpError(404, "not_a_night", "That date is not a movie night");
+    settle(s); // nights that just passed are looked up by the date they were held on
     if (date >= today(s)) {
       const night = upcoming(s, date).find((n) => n.date === date);
       if (night) return { kind: "upcoming", night };
@@ -462,6 +465,10 @@ export function createApp({ db, auth, movies, adminEmails, library = null, notif
 
   // ---------- views ----------
 
+  /** A night has started (so its pick counts as watched) once its date has passed or its start time has. */
+  const hasStarted = (s: Settings, date: string, time: string, isPast: boolean) =>
+    isPast || date < today(s) || (date === today(s) && clockIn(s.timezone) >= time);
+
   function personView(email: string | null, names: Map<string, string>) {
     return email ? { email, name: names.get(email) ?? email } : null;
   }
@@ -486,10 +493,13 @@ export function createApp({ db, auth, movies, adminEmails, library = null, notif
     const selectedId = n.entry?.selected_tmdb_id ?? null;
     const full = proposals.length === PROPOSAL_COUNT;
     const t = today(s);
+    const time = n.slot?.time ?? regularTime(n.date, s);
+    const ratings = n.entry && selectedId !== null
+      ? q.ratings.all(n.entry.id).map((r) => ({ person: personView(r.email, names), stars: r.halves / 2 })) : [];
     return {
       date: n.date,      // identifies the night in the API
       on: n.date,
-      time: n.slot?.time ?? regularTime(n.date, s),
+      time,
       regularTime: n.slot?.regularTime ?? regularTime(n.date, s),
       movedFrom: n.slot?.movedFrom ?? null,
       extra: n.slot?.extra ?? false,
@@ -506,6 +516,11 @@ export function createApp({ db, auth, movies, adminEmails, library = null, notif
       canPropose: n.roles.proposer === me.email && !n.isPast && selectedId === null,
       canChoose: n.roles.chooser === me.email && full && !n.isPast,
       canOverride: !!me.is_admin,
+      // Everyone rates the pick once it has been watched (the night has started).
+      ratings,
+      myRating: ratings.find((r) => r.person?.email === me.email)?.stars ?? null,
+      averageRating: ratings.length ? Math.round((ratings.reduce((a, r) => a + r.stars, 0) / ratings.length) * 10) / 10 : null,
+      canRate: selectedId !== null && hasStarted(s, n.date, time, n.isPast),
     };
   }
 
@@ -784,8 +799,10 @@ export function createApp({ db, auth, movies, adminEmails, library = null, notif
       db.query("DELETE FROM lineup_proposals WHERE night_id = ?").run(entry.id);
       const ins = db.query("INSERT INTO lineup_proposals (night_id, slot, tmdb_id, proposed_by) VALUES (?, ?, ?, ?)");
       ids.forEach((id, slot) => ins.run(entry.id, slot, id, me.email));
-      if (entry.selected_tmdb_id && !ids.includes(entry.selected_tmdb_id))
+      if (entry.selected_tmdb_id && !ids.includes(entry.selected_tmdb_id)) {
         db.query("UPDATE lineup SET selected_tmdb_id = NULL, selected_by = NULL, selected_at = NULL WHERE id = ?").run(entry.id);
+        q.clearRatings.run(entry.id);
+      }
     })();
     if (r.kind === "upcoming" && roles.chooser) {
       const when = `${dayLabel(r.night.date)} at ${timeLabel(r.night.time)}`;
@@ -809,6 +826,8 @@ export function createApp({ db, auth, movies, adminEmails, library = null, notif
     if (!entry || proposed.length !== PROPOSAL_COUNT) throw new HttpError(409, "no_proposals", "The proposer hasn't set the movies yet");
 
     const { tmdbId } = await body(c);
+    // Ratings are for the movie that was picked; a different pick (or none) starts them over.
+    if (tmdbId === null || Number(tmdbId) !== entry.selected_tmdb_id) q.clearRatings.run(entry.id);
     if (tmdbId === null) {
       db.query("UPDATE lineup SET selected_tmdb_id = NULL, selected_by = NULL, selected_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(entry.id);
     } else {
@@ -818,6 +837,30 @@ export function createApp({ db, auth, movies, adminEmails, library = null, notif
         .run(id, me.email, entry.id);
       if (r.kind === "upcoming")
         announce([{ person: me.email }, " picked ", { movie: id }, ` for ${dayLabel(r.night.date)} at ${timeLabel(r.night.time)}.`]);
+    }
+    return c.json(stateView(me));
+  });
+
+  // Rate the night's pick once it has been watched: 0.5 to 5 stars in half steps, or null to clear.
+  app.put("/api/nights/:date/rating", async (c) => {
+    const me = requireMe(c);
+    const s = getSettings();
+    const r = resolve(s, c.req.param("date"));
+    const entry = r.kind === "upcoming" ? r.night.entry : r.entry;
+    if (!entry?.selected_tmdb_id) throw new HttpError(409, "no_pick", "No movie was picked for this night");
+    const time = r.kind === "upcoming" ? r.night.time : regularTime(r.entry.held_on!, s);
+    if (!hasStarted(s, c.req.param("date"), time, r.kind === "past"))
+      throw new HttpError(409, "not_watched", "You can rate it once movie night has started");
+    const { stars } = await body(c);
+    if (stars === null) {
+      db.query("DELETE FROM ratings WHERE night_id = ? AND email = ?").run(entry.id, me.email);
+    } else {
+      const halves = Number(stars) * 2;
+      if (!Number.isInteger(halves) || halves < 1 || halves > 10)
+        throw new HttpError(400, "bad_rating", "Ratings go from 0.5 to 5 stars in half steps");
+      db.query(`INSERT INTO ratings (night_id, email, halves) VALUES (?, ?, ?)
+                ON CONFLICT (night_id, email) DO UPDATE SET halves = excluded.halves, updated_at = CURRENT_TIMESTAMP`)
+        .run(entry.id, me.email, halves);
     }
     return c.json(stateView(me));
   });
@@ -966,6 +1009,7 @@ export function createApp({ db, auth, movies, adminEmails, library = null, notif
           db.query("UPDATE lineup SET chooser_email = ? WHERE chooser_email = ?").run(next, email);
           db.query("UPDATE lineup SET selected_by = ? WHERE selected_by = ?").run(next, email);
           db.query("UPDATE lineup_proposals SET proposed_by = ? WHERE proposed_by = ?").run(next, email);
+          db.query("UPDATE ratings SET email = ? WHERE email = ?").run(next, email);
         })();
         return c.json(stateView(me));
       }

@@ -115,6 +115,16 @@ const MIGRATIONS: (string | ((db: Database) => void))[] = [
     sent_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
   `,
+  // Each participant's rating of a watched night's pick, in half stars (1 = 0.5 stars ... 10 = 5 stars).
+  `
+  CREATE TABLE ratings (
+    night_id   INTEGER NOT NULL,
+    email      TEXT NOT NULL,
+    halves     INTEGER NOT NULL CHECK (halves BETWEEN 1 AND 10),
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (night_id, email)
+  );
+  `,
 ];
 
 export function openDb(path: string): Database {

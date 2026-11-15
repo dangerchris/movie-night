@@ -334,6 +334,41 @@ describe("api", () => {
     expect(sent).toHaveLength(5);
   });
 
+  test("ratings: everyone rates the pick in half stars once the night has started", async () => {
+    const { call, setDay } = setup();
+    await three(call);
+    await call("a@x.com", "PUT", "/api/nights/2026-11-14/proposals", { tmdbIds: [1, 2, 3] });
+    const rate = (who: string, stars: unknown) => call(who, "PUT", "/api/nights/2026-11-14/rating", { stars });
+    expect((await rate("a@x.com", 4)).status).toBe(409); // nothing picked
+    await call("b@x.com", "PUT", "/api/nights/2026-11-14/selection", { tmdbId: 2 });
+    expect((await rate("a@x.com", 4)).status).toBe(409); // not watched yet
+    let r = await call("a@x.com", "GET", "/api/state");
+    expect(r.json.upcoming[0].canRate).toBe(false);
+
+    setDay("2026-11-15", "00:30"); // Sat 19:30 in Toronto: the night has started
+    r = await call("a@x.com", "GET", "/api/state");
+    expect(r.json.upcoming[0]).toMatchObject({ isToday: true, canRate: true, myRating: null, averageRating: null });
+    for (const bad of [0, 5.5, 3.3, -1, "x"]) expect((await rate("a@x.com", bad)).status).toBe(400);
+    expect((await rate("a@x.com", 4.5)).json.upcoming[0].myRating).toBe(4.5);
+    r = await rate("c@x.com", 2);
+    expect(r.json.upcoming[0]).toMatchObject({ myRating: 2, averageRating: 3.3 });
+    expect(r.json.upcoming[0].ratings.map((x: any) => `${x.person.name}:${x.stars}`)).toEqual(["A:4.5", "C:2"]);
+
+    // Still rateable after the night has passed; changing and clearing a rating.
+    setDay("2026-11-16");
+    expect((await rate("b@x.com", 0.5)).json.past[0]).toMatchObject({ date: "2026-11-14", canRate: true, myRating: 0.5 });
+    expect((await rate("b@x.com", 5)).json.past[0].myRating).toBe(5);
+    r = await rate("c@x.com", null);
+    expect(r.json.past[0].ratings.map((x: any) => `${x.person.name}:${x.stars}`)).toEqual(["A:4.5", "B:5"]);
+    expect(r.json.past[0].averageRating).toBe(4.8);
+
+    // A different pick starts the ratings over; the same pick keeps them.
+    r = await call("a@x.com", "PUT", "/api/nights/2026-11-14/selection", { tmdbId: 2 });
+    expect(r.json.past[0].ratings.length).toBe(2);
+    r = await call("a@x.com", "PUT", "/api/nights/2026-11-14/selection", { tmdbId: 3 });
+    expect(r.json.past[0].ratings).toEqual([]);
+  });
+
   test("runs of open nights between locked nights are planned without repeats when possible", async () => {
     const { call } = setup();
     await call(null, "POST", "/api/setup", { email: "a@x.com", name: "A" });

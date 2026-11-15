@@ -148,6 +148,21 @@ section + section { margin-top: 36px; }
 .past-item .meta { font-size: 12px; color: var(--muted); line-height: 1.35; }
 .past-item .meta b { color: var(--text); font-weight: 500; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
+/* ---------- ratings ---------- */
+.star-rating { position: relative; display: inline-block; font-size: 18px; line-height: 1; letter-spacing: 1px; white-space: nowrap; vertical-align: middle; }
+.star-base { color: var(--line); }
+.star-fill { position: absolute; left: 0; top: 0; overflow: hidden; color: var(--accent); }
+.star-half { position: absolute; top: 0; bottom: 0; width: 10%; background: none; border: 0; padding: 0; margin: 0; cursor: pointer; }
+.star-half:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 2px; }
+.rating { display: flex; align-items: center; gap: 4px 10px; flex-wrap: wrap; font-size: 12px; }
+.rating-avg { color: var(--accent); font-weight: 600; white-space: nowrap; }
+.rate-row { display: flex; align-items: center; gap: 12px; margin: -4px 0 14px; }
+.rate-row .rate-label { font-size: 13px; color: var(--muted); }
+.rate-row .star-rating { font-size: 24px; }
+.past-item .star-rating { font-size: 17px; }
+.pop-ratings { display: flex; flex-direction: column; gap: 2px; }
+.pop-ratings .star-rating { font-size: 13px; margin-left: 4px; }
+
 /* ---------- movie popover ---------- */
 .movie-pop {
   position: fixed; z-index: 50; width: min(380px, calc(100vw - 24px)); max-height: calc(100vh - 24px); overflow: auto;
