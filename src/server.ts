@@ -5,10 +5,13 @@ import { openDb } from "./db.ts";
 import { tmdbSource } from "./tmdb.ts";
 import { jellyfinLibrary } from "./jellyfin.ts";
 import { matrixNotifier } from "./matrix.ts";
+import { letterboxdWatchlists } from "./letterboxd.ts";
 
 const env = process.env;
+const db = openDb(env.DB_PATH ?? "./data/movie-night.sqlite");
 const app = createApp({
-  db: openDb(env.DB_PATH ?? "./data/movie-night.sqlite"),
+  db,
+  watchlists: letterboxdWatchlists(db),
   movies: tmdbSource(env.TMDB_TOKEN ?? ""),
   adminEmails: (env.ADMIN_EMAILS ?? "").split(","),
   library: jellyfinLibrary(env.JELLYFIN_URL ?? "", env.JELLYFIN_API_KEY ?? ""),

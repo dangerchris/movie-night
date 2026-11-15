@@ -475,6 +475,7 @@ function openPropose(date) {
   $("#search-input").value = "";
   pastProposals = null;
   libraryMovies = null;
+  watchlistMovies = null;
   showSuggestions();
   renderDraft();
   proposeDlg.showModal();
@@ -490,6 +491,22 @@ function openPropose(date) {
     for (const m of lib.movies) if ("streaming" in m) movieCache.set(m.id, m);
     if ($("#search-input").value.trim().length < 2) showSuggestions();
   }).catch(() => { libraryMovies = []; showSuggestions(); });
+  api("GET", "/api/watchlists").then((wl) => {
+    watchlistMovies = wl.movies;
+    watchlistInfo = wl;
+    for (const m of wl.movies) if ("streaming" in m) movieCache.set(m.id, m);
+    if ($("#search-input").value.trim().length < 2) showSuggestions();
+  }).catch(() => { watchlistMovies = []; showSuggestions(); });
+}
+
+let watchlistMovies = null; // Letterboxd watchlist movies not picked yet (null while loading)
+let watchlistInfo = { users: [], failed: [] };
+
+/** "On Chris's watchlist" / "On Chris and Liam's watchlists". */
+function watchlistCaption(m) {
+  const who = m.watchlistOf;
+  const names = who.length > 1 ? `${who.slice(0, -1).join(", ")} and ${who.at(-1)}` : who[0];
+  return `On ${esc(names)}'s watchlist${who.length > 1 ? "s" : ""}`;
 }
 
 let libraryMovies = null; // Jellyfin movies nobody has seen (null while loading)
@@ -516,16 +533,26 @@ function passedHtml(m) {
 function showSuggestions() {
   searchSeq++; // drop any in-flight search
   const box = $("#search-results");
-  if (pastProposals === null && libraryMovies === null) { box.innerHTML = `<p class="muted small">Loading suggestions…</p>`; return; }
+  if (pastProposals === null && libraryMovies === null && watchlistMovies === null) { box.innerHTML = `<p class="muted small">Loading suggestions…</p>`; return; }
   const past = pastProposals ?? [];
   const pastIds = new Set(past.map((m) => m.id));
-  const lib = (libraryMovies ?? []).filter((m) => !pastIds.has(m.id));
-  for (const m of [...past, ...lib]) known.set(m.id, m);
+  const wl = (watchlistMovies ?? []).filter((m) => !pastIds.has(m.id));
+  const wlIds = new Set(wl.map((m) => m.id));
+  const lib = (libraryMovies ?? []).filter((m) => !pastIds.has(m.id) && !wlIds.has(m.id));
+  for (const m of [...past, ...wl, ...lib]) known.set(m.id, m);
   const when = (m) => fmtDate(m.lastProposed, { month: "short", day: "numeric" });
   let html = "";
   if (past.length)
     html += `<p class="results-heading">Proposed before, never picked</p>`
       + past.map((m) => resultHtml(m, `${passedHtml(m)}<br>Last: ${esc(when(m))}${m.proposedBy ? ` · ${esc(m.proposedBy)}` : ""}`)).join("");
+  if (watchlistMovies === null)
+    html += `<p class="results-heading muted">Loading Letterboxd watchlists…</p>`;
+  else if (wl.length)
+    html += `<p class="results-heading">On Letterboxd watchlists<span class="muted small"> · ${wl.length}</span></p>`
+      + wl.map((m) => resultHtml(m, [watchlistCaption(m), m.inLibrary ? `<span class="badge lib">In library</span>` : "",
+          passedHtml(m)].filter(Boolean).join(" "))).join("");
+  if (watchlistInfo.failed?.length)
+    html += `<p class="results-heading muted small">Couldn't load ${esc(watchlistInfo.failed.join(", "))}'s Letterboxd watchlist right now.</p>`;
   if (libraryMovies === null)
     html += `<p class="results-heading muted">Loading the Jellyfin library…</p>`;
   else if (lib.length) {
@@ -687,13 +714,14 @@ function renderParticipants() {
   const inactive = state.participants.filter((p) => !p.active);
   const row = (p, i) => `<li class="${p.active ? "" : "inactive"}">
     <span class="pos">${p.active ? i + 1 : ""}</span>
-    <span class="who">${esc(p.name)}${p.isAdmin ? ` <span class="badge">admin</span>` : ""}<small>${esc(p.email)}${p.matrixId ? ` · ${esc(p.matrixId)}` : ""}</small></span>
+    <span class="who">${esc(p.name)}${p.isAdmin ? ` <span class="badge">admin</span>` : ""}<small>${esc(p.email)}${p.matrixId ? ` · ${esc(p.matrixId)}` : ""}${p.letterboxd ? ` · letterboxd.com/${esc(p.letterboxd)}` : ""}</small></span>
     <span class="ctrl">
       ${p.active ? `
         <button class="btn small ghost" data-action="p-up" data-email="${esc(p.email)}" ${i === 0 ? "disabled" : ""} aria-label="Move up">↑</button>
         <button class="btn small ghost" data-action="p-down" data-email="${esc(p.email)}" ${i === active.length - 1 ? "disabled" : ""} aria-label="Move down">↓</button>
         <button class="btn small ghost" data-action="p-rename" data-email="${esc(p.email)}">Rename</button>
         <button class="btn small ghost" data-action="p-matrix" data-email="${esc(p.email)}">Matrix ID</button>
+        <button class="btn small ghost" data-action="p-letterboxd" data-email="${esc(p.email)}">Letterboxd</button>
         ${p.email !== state.me.email ? `<button class="btn small ghost" data-action="p-email" data-email="${esc(p.email)}">Change email</button>` : ""}
         <button class="btn small ghost" data-action="p-admin" data-email="${esc(p.email)}">${p.isAdmin ? "Revoke admin" : "Make admin"}</button>
         <button class="btn small ghost" data-action="p-remove" data-email="${esc(p.email)}">Remove</button>`
@@ -790,6 +818,12 @@ document.addEventListener("click", async (e) => {
       const p = state.participants.find((x) => x.email === email);
       const id = prompt(`Matrix ID for ${p.name}, used to mention them in chat reminders (e.g. @alice:matrix.example.com). Leave empty for none.`, p.matrixId ?? "");
       if (id !== null) await patchP(email, { matrixId: id.trim() }, "Matrix ID saved");
+      return;
+    }
+    case "p-letterboxd": {
+      const p = state.participants.find((x) => x.email === email);
+      const user = prompt(`Letterboxd username for ${p.name}, to suggest movies from their watchlist when proposing (a profile link works too). Leave empty for none.`, p.letterboxd ?? "");
+      if (user !== null) await patchP(email, { letterboxd: user.trim() }, "Letterboxd saved");
       return;
     }
     case "p-rename": {

@@ -6,6 +6,7 @@ import { addDays, daysBetween, isIsoDate, isValidTimezone, rotationCycle, todayI
 import { TmdbError, type MovieDetails, type MovieSource } from "./tmdb.ts";
 import type { Library } from "./jellyfin.ts";
 import type { Notifier } from "./matrix.ts";
+import { letterboxdUsername, type Watchlists } from "./letterboxd.ts";
 
 export const PROPOSAL_COUNT = 3;
 const MOVIE_CACHE_MS = 7 * 86_400_000;
@@ -21,6 +22,7 @@ export interface AppDeps {
   adminEmails: string[];
   library?: Library | null;
   notifier?: Notifier | null;
+  watchlists?: Watchlists | null;
   now?: () => Date;
 }
 
@@ -31,6 +33,7 @@ interface Participant {
   active: number;
   is_admin: number;
   matrix_id: string | null;
+  letterboxd: string | null;
 }
 
 /**
@@ -92,7 +95,7 @@ export function tidyProviders(names: string[]): string[] {
   return [...set].filter((n) => !(n.endsWith(" (via Prime)") && set.has(n.slice(0, -" (via Prime)".length))));
 }
 
-export function createApp({ db, auth, movies, adminEmails, library = null, notifier = null, now = () => new Date() }: AppDeps) {
+export function createApp({ db, auth, movies, adminEmails, library = null, notifier = null, watchlists = null, now = () => new Date() }: AppDeps) {
   const admins = new Set(adminEmails.map((e) => e.trim().toLowerCase()).filter(Boolean));
 
   // ---------- data access ----------
@@ -405,6 +408,22 @@ export function createApp({ db, auth, movies, adminEmails, library = null, notif
     return q.activeOrder.all().map((p) => p.email).filter((e) => !rated.has(e));
   };
 
+  /**
+   * Post a person's first rating of a night's pick (later changes, or clearing and re-rating, stay
+   * quiet). The last person to rate gets the results summary instead. Not a mention: it's their own news.
+   */
+  function announceRating(entry: Entry, email: string, halves: number) {
+    const movie = entry.selected_tmdb_id;
+    if (!notifier || !movie) return;
+    const key = `rated:${entry.id}:${movie}:${email}`;
+    if (db.query("SELECT 1 FROM notifications WHERE key = ?").get(key)) return;
+    db.query("INSERT INTO notifications (key) VALUES (?)").run(key);
+    if (!unrated(entry.id).length) return;
+    const name = q.participant.get(email)?.name ?? email;
+    const liked = q.likes.all(entry.id).some((r) => r.email === email);
+    announce([`${name} rated `, { movie }, ` ${starLabel(halves)}${liked ? " ♥" : ""}.`]);
+  }
+
   /** Once everyone has rated a night's pick, post the results (once per night and movie). */
   function announceIfAllRated(entry: Entry) {
     const movie = entry.selected_tmdb_id;
@@ -586,7 +605,7 @@ export function createApp({ db, auth, movies, adminEmails, library = null, notif
   }
 
   function participantView(p: Participant) {
-    return { email: p.email, name: p.name, position: p.position, active: !!p.active, isAdmin: !!p.is_admin, matrixId: p.matrix_id };
+    return { email: p.email, name: p.name, position: p.position, active: !!p.active, isAdmin: !!p.is_admin, matrixId: p.matrix_id, letterboxd: p.letterboxd };
   }
 
   function addParticipant(email: string, name: string, isAdmin: boolean): Participant {
@@ -768,6 +787,44 @@ export function createApp({ db, auth, movies, adminEmails, library = null, notif
     });
   });
 
+  // Movies on participants' Letterboxd watchlists that movie night hasn't picked yet. Movies on more
+  // watchlists come first, then Letterboxd's order (most recently added first).
+  app.get("/api/watchlists", async (c) => {
+    requireMe(c);
+    const people = q.participants.all().filter((p) => p.active && p.letterboxd);
+    if (!watchlists || !people.length) return c.json({ enabled: !!watchlists, movies: [], users: [], failed: [] });
+    const s = getSettings();
+    const watched = watchedMap(s);
+    const passed = passedOverCounts();
+    const results = await Promise.allSettled(people.map((p) => watchlists.watchlist(p.letterboxd!)));
+    const byId = new Map<number, { film: { tmdbId: number; title: string; year: number | null }; who: string[]; rank: number }>();
+    results.forEach((r, i) => {
+      if (r.status !== "fulfilled") return;
+      r.value.forEach((f, rank) => {
+        if (watched.has(f.tmdbId)) return;
+        const hit = byId.get(f.tmdbId);
+        if (hit) { hit.who.push(people[i].name); hit.rank = Math.min(hit.rank, rank); }
+        else byId.set(f.tmdbId, { film: f, who: [people[i].name], rank });
+      });
+    });
+    const list = [...byId.values()].sort((a, b) => b.who.length - a.who.length || a.rank - b.rank);
+    void warmMovieCache(list.map((x) => x.film.tmdbId));
+    const lib = await libraryIndex();
+    return c.json({
+      enabled: true,
+      users: people.filter((_, i) => results[i].status === "fulfilled").map((p) => p.name),
+      failed: people.filter((_, i) => results[i].status === "rejected").map((p) => p.name),
+      movies: list.map(({ film, who }) => {
+        const cached = q.cachedMovie.get(film.tmdbId);
+        const base = cached ? movieView(JSON.parse(cached.data), s.region)
+          : { id: film.tmdbId, title: film.title, year: film.year ? String(film.year) : null, posterPath: null };
+        const inLib = lib?.byTmdb.get(film.tmdbId);
+        return { ...base, watchlistOf: who, inLibrary: !!inLib, jellyfinId: inLib?.jellyfinId, seenBy: inLib?.seenBy ?? [],
+          passedOver: passed.get(film.tmdbId) ?? 0 };
+      }),
+    });
+  });
+
   app.get("/api/library/poster/:id", async (c) => {
     requireMe(c);
     const id = c.req.param("id");
@@ -902,9 +959,11 @@ export function createApp({ db, auth, movies, adminEmails, library = null, notif
       const halves = Number(stars) * 2;
       if (!Number.isInteger(halves) || halves < 1 || halves > 10)
         throw new HttpError(400, "bad_rating", "Ratings go from 0.5 to 5 stars in half steps");
+      const first = !q.ratings.all(entry.id).some((r) => r.email === me.email);
       db.query(`INSERT INTO ratings (night_id, email, halves) VALUES (?, ?, ?)
                 ON CONFLICT (night_id, email) DO UPDATE SET halves = excluded.halves, updated_at = CURRENT_TIMESTAMP`)
         .run(entry.id, me.email, halves);
+      if (first) announceRating(entry, me.email, halves);
       announceIfAllRated(entry);
     }
     return c.json(stateView(me));
@@ -1075,6 +1134,12 @@ export function createApp({ db, auth, movies, adminEmails, library = null, notif
       const id = String(b.matrixId ?? "").trim();
       if (id && !/^@[^:\s]+:\S+$/.test(id)) throw new HttpError(400, "bad_matrix_id", "Matrix IDs look like @name:server");
       db.query("UPDATE participants SET matrix_id = ? WHERE email = ?").run(id || null, email);
+    }
+    if ("letterboxd" in b) {
+      const raw = String(b.letterboxd ?? "").trim();
+      const user = raw ? letterboxdUsername(raw) : null;
+      if (raw && !user) throw new HttpError(400, "bad_letterboxd", "Enter a Letterboxd username or profile link");
+      db.query("UPDATE participants SET letterboxd = ? WHERE email = ?").run(user, email);
     }
     if ("name" in b) {
       const name = String(b.name ?? "").trim();

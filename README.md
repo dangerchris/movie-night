@@ -4,7 +4,7 @@ A small self-hosted web app for a recurring movie night among a few friends. Eac
 
 - **Schedule:** one or more movie nights a week, each weekday with its own start time. Single nights can be moved, retimed or skipped.
 - **Fair rotation:** everyone proposes and chooses once per round. Nobody gets the same role on consecutive nights, and the pairings vary.
-- **Proposing:** search all of TMDB. The dialog also suggests movies that were passed over before (with how many times) and unwatched movies from the Jellyfin library.
+- **Proposing:** search all of TMDB. The dialog also suggests movies that were passed over before (with how many times) movies on participants' Letterboxd watchlists, and unwatched movies from the Jellyfin library.
 - **Picking:** posters with a hover card showing rating, certification, runtime, a spoiler-light synopsis, director, cast, streaming services and a trailer link. The chooser picks from the card or the poster.
 - **Ratings:** once a night has started, everyone can rate the pick from 0.5 to 5 stars in half steps and like it with a heart. Past nights show your rating, the group average and the like count, and the hover card lists everyone's.
 - **Sign-in:** Google login through Cloudflare Access. The app itself has no passwords.
@@ -23,7 +23,7 @@ Built with [Bun](https://bun.sh), [Hono](https://hono.dev) and `bun:sqlite`, wit
 **Proposing and picking.** The proposer sets or changes the 3 choices until a movie is picked. The chooser picks, switches or undoes their pick until the night has passed. Admins can act for anyone with **Admin override**.
 
 **Admin tools.** These are in **Settings** and on each night:
-- **Participants:** add (by Google email), reorder the rotation, rename, change email, set a Matrix ID, make admin, or remove.
+- **Participants:** add (by Google email), reorder the rotation, rename, change email, set a Matrix ID or Letterboxd username, make admin, or remove.
 - **Settings:** the weekly nights and times, the timezone, and the rating region used for certifications and streaming.
 - **Per night:** **Change date** (with **Back to regular schedule** to undo), **Skip this date** (skipped dates show with **Restore**), and **Edit roles**.
 
@@ -70,6 +70,10 @@ Everything else (participants, schedule, timezone, region) is set in the app und
 
 - **Requests through Cloudflare** (they carry `Cf-Ray`/`Cf-Connecting-Ip` headers) must have a valid Cloudflare Access JWT. It's checked against `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD`, and the email in it must belong to an active participant. If Access isn't configured, these requests are refused.
 - **Direct requests** (no Cloudflare headers) use the name picker, subject to `PICKER`. With the default `localhost`, other devices on the network are told to use `PUBLIC_URL`, so nobody on the LAN can impersonate a participant.
+
+### Letterboxd
+
+Set a participant's Letterboxd username in Settings to suggest movies from their watchlist when proposing. Letterboxd has no public API, so the app reads the public watchlist pages (the watchlist must be public), looks up each film's TMDB id once from its film page, and re-reads watchlists every 6 hours. If Letterboxd blocks or changes its pages, the suggestions just don't appear.
 
 ### TMDB
 

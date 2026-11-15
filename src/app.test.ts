@@ -3,6 +3,7 @@ import { createApp, tidyProviders } from "./app.ts";
 import { openDb } from "./db.ts";
 import { nightsBetween, rotationRoles, upcomingNightDates } from "./schedule.ts";
 import type { MovieSource } from "./tmdb.ts";
+import { letterboxdUsername, letterboxdWatchlists, parseFilmPage, parseWatchlistPage } from "./letterboxd.ts";
 
 const fakeMovies: MovieSource = {
   async search(q) { return [1, 2].map((id) => ({ id, title: q, year: "2000", posterPath: null, overview: "", rating: 7 })); },
@@ -333,31 +334,43 @@ describe("api", () => {
     await app.runReminders();
     expect(sent).toHaveLength(5);
 
-    // The morning after (10:00): whoever hasn't rated is asked, once.
+    // Each person's first rating is posted, without mentioning them; changes stay quiet.
     await call("b@x.com", "PUT", "/api/nights/2026-11-14/rating", { stars: 4.5 });
+    await flush();
+    expect(sent).toHaveLength(6);
+    expect(sent[5].text).toContain("B rated Movie 2 4.5★.");
+    expect(sent[5].mentions).toEqual([]);
     await call("b@x.com", "PUT", "/api/nights/2026-11-14/like", { liked: true });
+    await call("b@x.com", "PUT", "/api/nights/2026-11-14/rating", { stars: null });
+    await call("b@x.com", "PUT", "/api/nights/2026-11-14/rating", { stars: 4.5 });
+    await flush();
+    expect(sent).toHaveLength(6);
+
+    // The morning after (10:00): whoever hasn't rated is asked, once.
     setDay("2026-11-15", "14:00");
     await app.runReminders();
-    expect(sent).toHaveLength(5);
+    expect(sent).toHaveLength(6);
     setDay("2026-11-15", "15:05");
     await app.runReminders();
     await app.runReminders();
-    expect(sent).toHaveLength(6);
-    expect(sent[5].text).toContain("How was Movie 2? A and C, rate it");
-    // When the last person rates, the results are posted once.
+    expect(sent).toHaveLength(7);
+    expect(sent[6].text).toContain("How was Movie 2? A and C, rate it");
+    await call("a@x.com", "PUT", "/api/nights/2026-11-14/like", { liked: true });
     await call("a@x.com", "PUT", "/api/nights/2026-11-14/rating", { stars: 3 });
     await flush();
-    expect(sent).toHaveLength(6);
+    expect(sent).toHaveLength(8);
+    expect(sent[7].text).toContain("A rated Movie 2 3★ ♥.");
+    // The last person to rate gets the results summary instead, posted once.
     await call("c@x.com", "PUT", "/api/nights/2026-11-14/rating", { stars: 4 });
     await call("c@x.com", "PUT", "/api/nights/2026-11-14/rating", { stars: 3.5 });
     await flush();
-    expect(sent).toHaveLength(7);
-    expect(sent[6].text).toContain("Everyone has rated Movie 2: 3.8★ on average (A 3★, B 4.5★ ♥, C 4★).");
-    expect(sent[6].mentions).toEqual(["@bee:chat"]);
+    expect(sent).toHaveLength(9);
+    expect(sent[8].text).toContain("Everyone has rated Movie 2: 3.8★ on average (A 3★ ♥, B 4.5★ ♥, C 4★).");
+    expect(sent[8].mentions).toEqual(["@bee:chat"]);
     // Nobody left to ask the next day.
     setDay("2026-11-16", "15:05");
     await app.runReminders();
-    expect(sent).toHaveLength(7);
+    expect(sent).toHaveLength(9);
   });
 
   test("ratings: everyone rates the pick in half stars once the night has started", async () => {
@@ -541,5 +554,87 @@ describe("api", () => {
     expect((await call("b@x.com", "PATCH", "/api/participants/b%40x.com", { name: "Bobby" })).status).toBe(200);
     expect((await call("b@x.com", "PATCH", "/api/participants/a%40x.com", { name: "Nope" })).status).toBe(403);
     expect((await call("b@x.com", "PATCH", "/api/participants/b%40x.com", { isAdmin: true })).status).toBe(403);
+  });
+});
+
+describe("letterboxd", () => {
+  const item = (slug: string, name: string) =>
+    `<div class="react-component" data-component-class="LazyPoster" data-item-name="${name.replace(/ \(\d{4}\)$/, "")}" data-item-slug="${slug}" data-item-full-display-name="${name}"></div>`;
+
+  test("parses watchlist pages, film pages and usernames", () => {
+    const html = `${item("bugonia", "Bugonia (2025)")}${item("amelie", "Am&#233;lie (2001)")}${item("untitled", "Untitled")}
+      <li class="paginate-page"><a href="/x/watchlist/page/2/">2</a></li><li class="paginate-page"><a href="/x/watchlist/page/3/">3</a></li>`;
+    expect(parseWatchlistPage(html)).toEqual({
+      films: [{ slug: "bugonia", title: "Bugonia", year: 2025 }, { slug: "amelie", title: "Amélie", year: 2001 }, { slug: "untitled", title: "Untitled", year: null }],
+      pages: 3,
+    });
+    expect(parseWatchlistPage("<p>nothing</p>")).toEqual({ films: [], pages: 1 });
+    expect(parseFilmPage(`<body class="film" data-tmdb-id="701387" data-tmdb-type="movie">`)).toBe(701387);
+    expect(parseFilmPage(`<body data-tmdb-id="1399" data-tmdb-type="tv">`)).toBe(null);
+    expect(parseFilmPage(`<body>`)).toBe(null);
+    expect(letterboxdUsername("https://letterboxd.com/DangerChris/watchlist/")).toBe("dangerchris");
+    expect(letterboxdUsername("@dangerchris")).toBe("dangerchris");
+    expect(letterboxdUsername("not a name")).toBe(null);
+  });
+
+  test("reads every page, resolves TMDB ids once and skips TV", async () => {
+    const db = openDb(":memory:");
+    const hits: string[] = [];
+    const pages: Record<string, string> = {
+      "/ann/watchlist/": item("a-film", "A Film (2020)") + item("a-show", "A Show (2019)") + `<a href="/ann/watchlist/page/2/">2</a>`,
+      "/ann/watchlist/page/2/": item("b-film", "B Film (2021)"),
+      "/film/a-film/": `<body data-tmdb-id="11" data-tmdb-type="movie">`,
+      "/film/a-show/": `<body data-tmdb-id="22" data-tmdb-type="tv">`,
+      "/film/b-film/": `<body data-tmdb-id="33" data-tmdb-type="movie">`,
+    };
+    const fakeFetch = (async (url: string) => {
+      const path = url.replace("https://letterboxd.com", "");
+      hits.push(path);
+      return pages[path] ? new Response(pages[path]) : new Response("nope", { status: 404 });
+    }) as unknown as typeof fetch;
+    const films = await letterboxdWatchlists(db, fakeFetch).watchlist("ann");
+    expect(films).toEqual([{ slug: "a-film", title: "A Film", year: 2020, tmdbId: 11 }, { slug: "b-film", title: "B Film", year: 2021, tmdbId: 33 }]);
+    // A fresh reader (e.g. after a restart) re-reads the watchlist but not the film pages.
+    hits.length = 0;
+    await letterboxdWatchlists(db, fakeFetch).watchlist("ann");
+    expect(hits).toEqual(["/ann/watchlist/", "/ann/watchlist/page/2/"]);
+  });
+
+  test("watchlist suggestions merge participants' lists and leave out watched movies", async () => {
+    const lists: Record<string, any[]> = {
+      ann: [{ slug: "x", tmdbId: 5, title: "Five", year: 2005 }, { slug: "y", tmdbId: 6, title: "Six", year: 2006 }, { slug: "z", tmdbId: 7, title: "Seven", year: 2007 }],
+      bob: [{ slug: "z", tmdbId: 7, title: "Seven", year: 2007 }],
+    };
+    const watchlists = { async watchlist(u: string) { if (!lists[u]) throw new Error("down"); return lists[u]; } };
+    const clock = new Date("2026-11-10T17:00:00Z");
+    const app = createApp({
+      db: openDb(":memory:"), movies: fakeMovies, adminEmails: [], watchlists, now: () => clock,
+      auth: { accessTeamDomain: "", accessAud: "", picker: "localhost", publicUrl: "" },
+    });
+    const call = async (as: string | null, method: string, path: string, body?: unknown) => {
+      const headers: Record<string, string> = { "content-type": "application/json" };
+      if (as) headers.cookie = `mn_user=${as}`;
+      const res = await app.request(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) }, { requestIP: () => ({ address: "127.0.0.1" }) });
+      return { status: res.status, json: (await res.json()) as any };
+    };
+    await call(null, "POST", "/api/setup", { email: "a@x.com", name: "A" });
+    await call("a@x.com", "POST", "/api/participants", { email: "b@x.com", name: "B" });
+    await call("a@x.com", "POST", "/api/participants", { email: "c@x.com", name: "C" });
+    expect((await call("a@x.com", "GET", "/api/watchlists")).json).toMatchObject({ enabled: true, movies: [] });
+
+    expect((await call("a@x.com", "PATCH", "/api/participants/a%40x.com", { letterboxd: "no spaces please" })).status).toBe(400);
+    let r = await call("a@x.com", "PATCH", "/api/participants/a%40x.com", { letterboxd: "https://letterboxd.com/Ann/" });
+    expect(r.json.participants[0].letterboxd).toBe("ann");
+    expect((await call("b@x.com", "PATCH", "/api/participants/b%40x.com", { letterboxd: "bob" })).status).toBe(200); // self
+    expect((await call("b@x.com", "PATCH", "/api/participants/c%40x.com", { letterboxd: "cat" })).status).toBe(403);
+    await call("a@x.com", "PATCH", "/api/participants/c%40x.com", { letterboxd: "gone" }); // fails to load
+
+    // Movie 6 gets picked (watched); Seven is on two lists so it comes first.
+    await call("a@x.com", "PUT", "/api/nights/2026-11-14/proposals", { tmdbIds: [6, 8, 9] });
+    await call("b@x.com", "PUT", "/api/nights/2026-11-14/selection", { tmdbId: 6 });
+    r = await call("c@x.com", "GET", "/api/watchlists");
+    expect(r.json.users).toEqual(["A", "B"]);
+    expect(r.json.failed).toEqual(["C"]);
+    expect(r.json.movies.map((m: any) => [m.id, m.watchlistOf])).toEqual([[7, ["A", "B"]], [5, ["A"]]]);
   });
 });

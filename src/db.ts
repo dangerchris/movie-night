@@ -135,6 +135,14 @@ const MIGRATIONS: (string | ((db: Database) => void))[] = [
     PRIMARY KEY (night_id, email)
   );
   `,
+  // Letterboxd watchlists: each participant's username, and film slugs resolved to TMDB ids.
+  `
+  ALTER TABLE participants ADD COLUMN letterboxd TEXT;
+  CREATE TABLE letterboxd_films (
+    slug    TEXT PRIMARY KEY,
+    tmdb_id INTEGER          -- NULL: not a movie on TMDB (e.g. TV)
+  );
+  `,
 ];
 
 export function openDb(path: string): Database {
