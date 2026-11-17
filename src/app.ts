@@ -846,8 +846,13 @@ export function createApp({ db, auth, movies, adminEmails, library = null, notif
         excludeId = r.kind === "past" ? r.entry.id : r.night.entry?.id ?? null;
       } catch { /* not a night */ }
     }
+    // Movies already proposed again for another night still waiting for a pick aren't suggested.
+    const pending = new Set(db.query<{ tmdb_id: number; night_id: number }, []>(
+      `SELECT p.tmdb_id, p.night_id FROM lineup_proposals p JOIN lineup l ON l.id = p.night_id
+        WHERE l.held_on IS NULL AND l.selected_tmdb_id IS NULL`).all()
+      .filter((r) => r.night_id !== excludeId).map((r) => r.tmdb_id));
     const rows = q.passedOver.all()
-      .filter((r) => r.night_id !== excludeId)
+      .filter((r) => r.night_id !== excludeId && !pending.has(r.tmdb_id))
       .map((r) => ({ ...r, on: r.held_on ?? dates.get(r.night_id) ?? "" }))
       .sort((a, b) => b.on.localeCompare(a.on) || a.slot - b.slot);
     const passed = passedOverCounts();

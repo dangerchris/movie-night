@@ -490,8 +490,11 @@ describe("api", () => {
     await call("a@x.com", "PUT", "/api/nights/2026-11-14/proposals", { tmdbIds: [1, 2, 3] });
     await call("a@x.com", "PUT", "/api/nights/2026-11-14/selection", { tmdbId: 2 });
     await call("a@x.com", "PUT", "/api/nights/2026-11-21/proposals", { tmdbIds: [3, 4, 5] });
-    // Nov 21 is still waiting for a pick, so its movies aren't offered yet.
+    // Nov 21 is still waiting for a pick, so its movies aren't offered yet, and neither is 3, passed
+    // over on Nov 14 but proposed again for Nov 21. Proposing for Nov 21 itself, 3 is offered.
     let r = await call("a@x.com", "GET", "/api/proposal-history?exclude=2026-11-28");
+    expect(r.json.movies.map((m: any) => m.id)).toEqual([1]);
+    r = await call("a@x.com", "GET", "/api/proposal-history?exclude=2026-11-21");
     expect(r.json.movies.map((m: any) => m.id)).toEqual([1, 3]);
     expect(r.json.movies[1]).toMatchObject({ lastProposed: "2026-11-14", proposedBy: "A" });
     // Once Nov 21 is picked, its other two join the list (newest first; 3 deduped; picked ones never listed).
